@@ -7,6 +7,11 @@ export interface VaultboxSettings {
   syncIntervalMinutes: number;
   syncOnStartup: boolean;
   confirmBeforeManualSync: boolean;
+  syncCommunityPlugins: boolean;
+  syncThemes: boolean;
+  syncSnippets: boolean;
+  syncExtraHiddenDirs: string[];
+  syncExcludePaths: string[];
   localChangeIndicatorEnabled: boolean;
   remoteChangeIndicatorEnabled: boolean;
   remoteChangeCheckIntervalMinutes: number;
@@ -25,6 +30,11 @@ export const DEFAULT_SETTINGS: VaultboxSettings = {
   syncIntervalMinutes: 15,
   syncOnStartup: false,
   confirmBeforeManualSync: true,
+  syncCommunityPlugins: false,
+  syncThemes: false,
+  syncSnippets: false,
+  syncExtraHiddenDirs: [],
+  syncExcludePaths: [],
   localChangeIndicatorEnabled: true,
   remoteChangeIndicatorEnabled: false,
   remoteChangeCheckIntervalMinutes: 15,

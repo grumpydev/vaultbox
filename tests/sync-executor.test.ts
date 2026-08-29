@@ -5,16 +5,21 @@ import {
   type SyncDropboxClient,
 } from "../src/sync-executor";
 import { getDropboxContentHash, normalizePathKey, type SyncPlan } from "../src/sync-plan";
-import type { DropboxFileMetadata, SyncedFileState, VaultboxSyncState } from "../src/types";
+import { createSyncPathPolicy } from "../src/sync-policy";
+import { DEFAULT_SETTINGS, type DropboxFileMetadata, type SyncedFileState, type VaultboxSettings, type VaultboxSyncState } from "../src/types";
 
 type ExecuteSyncPlanArgs = Parameters<typeof executeSyncPlanRaw>[0];
 
-function executeSyncPlan(args: Omit<ExecuteSyncPlanArgs, "fileManager">): ReturnType<typeof executeSyncPlanRaw> {
+function executeSyncPlan(
+  args: Omit<ExecuteSyncPlanArgs, "fileManager" | "pathPolicy"> & { settings?: VaultboxSettings },
+): ReturnType<typeof executeSyncPlanRaw> {
+  const { settings = DEFAULT_SETTINGS, ...executionArgs } = args;
   return executeSyncPlanRaw({
-    ...args,
+    ...executionArgs,
+    pathPolicy: createSyncPathPolicy(settings, ".obsidian"),
     fileManager: {
       trashFile: async (file: { path: string }) => {
-        await (args.vault as { delete(file: { path: string }): Promise<void> }).delete(file);
+        await (executionArgs.vault as { delete(file: { path: string }): Promise<void> }).delete(file);
       },
     } as never,
   });
@@ -57,6 +62,94 @@ describe("sync executor", () => {
       remoteContentHash: remoteHash,
       remoteRev: "rev-new",
     });
+  });
+
+  it("uploads enabled configuration files through the adapter", async () => {
+    const path = ".obsidian/community-plugins.json";
+    const content = '["dataview"]';
+    const contentHash = await hash(content);
+    const vault = new FakeVault({ [path]: content });
+    const dropbox = new FakeDropbox({
+      uploadResult: remoteFile(`/Vault/${path}`, contentHash, "rev-config"),
+    });
+
+    const result = await executeSyncPlan({
+      vault: vault.asVault(),
+      dropbox,
+      rootPath: "/Vault",
+      currentState: emptyState(),
+      settings: { ...DEFAULT_SETTINGS, syncCommunityPlugins: true },
+      plan: plan([{ kind: "upload", path, local: localFile(path, contentHash) }]),
+    });
+
+    expect(dropbox.upload).toHaveBeenCalledWith(expect.objectContaining({
+      path: `/Vault/${path}`,
+      content: expect.any(ArrayBuffer),
+    }));
+    expect(result.state.files[path]).toBeDefined();
+  });
+
+  it("downloads enabled configuration files through the adapter", async () => {
+    const path = ".obsidian/themes/example/theme.css";
+    const content = "body { color: blue; }";
+    const contentHash = await hash(content);
+    const vault = new FakeVault({});
+    const dropbox = new FakeDropbox({ downloadContent: bytes(content) });
+
+    await executeSyncPlan({
+      vault: vault.asVault(),
+      dropbox,
+      rootPath: "/Vault",
+      currentState: emptyState(),
+      settings: { ...DEFAULT_SETTINGS, syncThemes: true },
+      plan: plan([{
+        kind: "download",
+        path,
+        remote: remoteFile(path, contentHash, "rev-theme"),
+      }]),
+    });
+
+    expect(vault.text(path)).toBe(content);
+  });
+
+  it("refuses excluded configuration paths at execution time", async () => {
+    const path = ".obsidian/app.json";
+    const contentHash = await hash("{}");
+
+    await expect(executeSyncPlan({
+      vault: new FakeVault({}).asVault(),
+      dropbox: new FakeDropbox({ downloadContent: bytes("{}") }),
+      rootPath: "/Vault",
+      currentState: emptyState(),
+      plan: plan([{
+        kind: "download",
+        path,
+        remote: remoteFile(path, contentHash, "rev-config"),
+      }]),
+    })).rejects.toThrow(/Refusing to sync excluded or unsafe path/);
+  });
+
+  it("deletes enabled configuration files through the adapter", async () => {
+    const path = ".obsidian/community-plugins.json";
+    const content = '["dataview"]';
+    const contentHash = await hash(content);
+    const previous = synced(path, contentHash, contentHash, "rev-old");
+    const vault = new FakeVault({ [path]: content });
+    const dropbox = new FakeDropbox({
+      metadataError: new Error("Dropbox /files/get_metadata failed with 409: path/not_found/"),
+    });
+
+    const result = await executeSyncPlan({
+      vault: vault.asVault(),
+      dropbox,
+      rootPath: "/Vault",
+      currentState: state([previous]),
+      settings: { ...DEFAULT_SETTINGS, syncCommunityPlugins: true },
+      plan: plan([{ kind: "delete-local", path, previous }]),
+    });
+
+    expect(vault.hasFile(path)).toBe(false);
+    expect(result.state.files[path]).toBeUndefined();
   });
 
   it("creates each remote parent folder only once per sync", async () => {
@@ -507,6 +600,34 @@ class FakeVault {
       },
       delete: async (file: { path: string }) => {
         this.files.delete(file.path);
+      },
+      adapter: {
+        stat: async (path: string) => {
+          if (this.files.has(path)) {
+            return { type: "file", ctime: 1, mtime: 1, size: this.files.get(path)?.byteLength ?? 0 };
+          }
+          if (this.folders.has(path)) {
+            return { type: "folder", ctime: 1, mtime: 1, size: 0 };
+          }
+          return null;
+        },
+        readBinary: async (path: string) => {
+          const content = this.files.get(path);
+          if (!content) {
+            throw new Error(`Missing adapter file: ${path}`);
+          }
+          return content;
+        },
+        writeBinary: async (path: string, content: ArrayBuffer) => {
+          this.addParentFolders(path);
+          this.files.set(path, content);
+        },
+        remove: async (path: string) => {
+          this.files.delete(path);
+        },
+        mkdir: async (path: string) => {
+          this.folders.add(path);
+        },
       },
     } as never;
   }

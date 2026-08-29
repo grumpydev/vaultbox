@@ -229,39 +229,38 @@ function normalizeListResult(result: {
 }
 
 function normalizeMetadata(entry: unknown): DropboxMetadata {
-  const raw = entry as Record<string, unknown>;
-  const tag = raw[".tag"] ?? inferMetadataTag(raw);
+  const tag = getStringProperty(entry, ".tag") ?? inferMetadataTag(entry);
 
   if (tag === "file") {
     return {
       tag: "file",
-      name: String(raw.name ?? ""),
-      pathDisplay: String(raw.path_display ?? ""),
-      pathLower: String(raw.path_lower ?? ""),
-      id: String(raw.id ?? ""),
-      clientModified: String(raw.client_modified ?? ""),
-      serverModified: String(raw.server_modified ?? ""),
-      rev: String(raw.rev ?? ""),
-      size: Number(raw.size ?? 0),
-      contentHash: String(raw.content_hash ?? ""),
+      name: getStringProperty(entry, "name") ?? "",
+      pathDisplay: getStringProperty(entry, "path_display") ?? "",
+      pathLower: getStringProperty(entry, "path_lower") ?? "",
+      id: getStringProperty(entry, "id") ?? "",
+      clientModified: getStringProperty(entry, "client_modified") ?? "",
+      serverModified: getStringProperty(entry, "server_modified") ?? "",
+      rev: getStringProperty(entry, "rev") ?? "",
+      size: getNumberProperty(entry, "size") ?? 0,
+      contentHash: getStringProperty(entry, "content_hash") ?? "",
     };
   }
 
   if (tag === "folder") {
     return {
       tag: "folder",
-      name: String(raw.name ?? ""),
-      pathDisplay: String(raw.path_display ?? ""),
-      pathLower: String(raw.path_lower ?? ""),
-      id: String(raw.id ?? ""),
+      name: getStringProperty(entry, "name") ?? "",
+      pathDisplay: getStringProperty(entry, "path_display") ?? "",
+      pathLower: getStringProperty(entry, "path_lower") ?? "",
+      id: getStringProperty(entry, "id") ?? "",
     };
   }
 
-  throw new Error(`Unsupported Dropbox metadata tag: ${String(tag)}`);
+  throw new Error(`Unsupported Dropbox metadata tag: ${tag ?? "missing"}`);
 }
 
-function inferMetadataTag(raw: Record<string, unknown>): "file" | undefined {
-  if (typeof raw.rev === "string" || typeof raw.content_hash === "string") {
+function inferMetadataTag(entry: unknown): "file" | undefined {
+  if (getStringProperty(entry, "rev") !== null || getStringProperty(entry, "content_hash") !== null) {
     return "file";
   }
 
@@ -383,5 +382,5 @@ function getObjectProperty(value: unknown, key: string): unknown {
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }

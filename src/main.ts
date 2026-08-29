@@ -10,6 +10,7 @@ import { DropboxClient, normalizeDropboxPath } from "./dropbox";
 import { VAULTBOX_ICON_PATHS } from "./icons";
 import { VaultboxSettingTab } from "./settings-tab";
 import { executeSyncPlan, SyncExecutionError } from "./sync-executor";
+import { createSyncPathPolicy, filterSyncState, type SyncPathPolicy } from "./sync-policy";
 import {
   createRemoteFileSnapshot,
   createSyncPlan,
@@ -21,7 +22,7 @@ import {
 import { DEFAULT_SETTINGS, type VaultboxSettings, type VaultboxSyncState } from "./types";
 
 interface VaultboxPluginData {
-  settings?: Partial<VaultboxSettings>;
+  settings?: Partial<VaultboxSettings> & { dropboxAppKey?: string };
   pendingAuthCodeVerifier?: string;
   syncState?: VaultboxSyncState;
   debugLog?: DebugLogEntry[];
@@ -86,17 +87,27 @@ export default class VaultboxPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     const data = await this.loadPluginData();
-    const savedSettings = data?.settings as (Partial<VaultboxSettings> & { dropboxAppKey?: string }) | undefined;
+    const savedSettings = data.settings;
     const { dropboxAppKey: _dropboxAppKey, ...settings } = savedSettings ?? {};
     this.settings = {
       ...DEFAULT_SETTINGS,
       ...settings,
     };
+    const policy = this.getSyncPathPolicy();
+    this.settings.syncExtraHiddenDirs = policy.extraHiddenDirs;
+    this.settings.syncExcludePaths = policy.excludePatterns;
     this.pendingAuthCodeVerifier = data?.pendingAuthCodeVerifier ?? "";
-    this.syncState = data?.syncState ?? { files: {}, lastSyncedAt: 0 };
+    this.syncState = filterSyncState(
+      data?.syncState ?? { files: {}, lastSyncedAt: 0 },
+      policy,
+    );
   }
 
   async saveSettings(): Promise<void> {
+    const policy = this.getSyncPathPolicy();
+    this.settings.syncExtraHiddenDirs = policy.extraHiddenDirs;
+    this.settings.syncExcludePaths = policy.excludePatterns;
+    this.syncState = filterSyncState(this.syncState, policy);
     await this.savePluginData({
       settings: this.settings,
       pendingAuthCodeVerifier: this.pendingAuthCodeVerifier,
@@ -119,7 +130,7 @@ export default class VaultboxPlugin extends Plugin {
       return {};
     }
 
-    return data as VaultboxPluginData;
+    return data;
   }
 
   getDebugLogText(): string {
@@ -199,6 +210,10 @@ export default class VaultboxPlugin extends Plugin {
     });
   }
 
+  getSyncPathPolicy(): SyncPathPolicy {
+    return createSyncPathPolicy(this.settings, this.app.vault.configDir);
+  }
+
   async validateSelectedFolder(): Promise<void> {
     const folderPath = normalizeDropboxPath(this.settings.selectedFolderPath);
     if (!folderPath) {
@@ -275,6 +290,7 @@ export default class VaultboxPlugin extends Plugin {
         fileManager: this.app.fileManager,
         dropbox: this.createDropboxClient(),
         rootPath: normalizeDropboxPath(this.settings.selectedFolderPath),
+        pathPolicy: this.getSyncPathPolicy(),
         plan,
         currentState: this.syncState,
         onProgress: (progress) => {
@@ -338,16 +354,17 @@ export default class VaultboxPlugin extends Plugin {
 
     this.settings.selectedFolderPath = folderPath;
     await this.saveSettings();
+    const pathPolicy = this.getSyncPathPolicy();
 
     const [localFiles, remoteFiles] = await Promise.all([
-      scanLocalVault(this.app.vault, this.app.vault.configDir),
+      scanLocalVault(this.app.vault, pathPolicy),
       this.createDropboxClient().listAllFiles(folderPath),
     ]);
 
     return createSyncPlan({
       localFiles,
-      remoteFiles: createRemoteFileSnapshot(remoteFiles, folderPath),
-      state: this.syncState,
+      remoteFiles: createRemoteFileSnapshot(remoteFiles, folderPath, pathPolicy),
+      state: filterSyncState(this.syncState, pathPolicy),
     });
   }
 }

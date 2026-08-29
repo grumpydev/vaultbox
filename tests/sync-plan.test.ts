@@ -5,16 +5,21 @@ import {
   formatSyncPlan,
   getDropboxContentHash,
   normalizePathKey,
+  scanLocalVault,
   shouldSyncPath,
   type LocalFileSnapshot,
 } from "../src/sync-plan";
-import type { DropboxFileMetadata, SyncedFileState, VaultboxSyncState } from "../src/types";
+import { createSyncPathPolicy, filterSyncState } from "../src/sync-policy";
+import { DEFAULT_SETTINGS, type DropboxFileMetadata, type SyncedFileState, type VaultboxSyncState } from "../src/types";
+
+const DEFAULT_POLICY = createSyncPathPolicy(DEFAULT_SETTINGS, ".obsidian");
 
 describe("sync planner", () => {
   it("excludes Obsidian configuration files from sync", () => {
-    expect(shouldSyncPath(".custom-obsidian/app.json", ".custom-obsidian")).toBe(false);
-    expect(shouldSyncPath(".obsidian/app.json", ".custom-obsidian")).toBe(true);
-    expect(shouldSyncPath("Notes/A.md", ".custom-obsidian")).toBe(true);
+    const policy = createSyncPathPolicy(DEFAULT_SETTINGS, ".custom-obsidian");
+    expect(shouldSyncPath(".custom-obsidian/app.json", policy)).toBe(false);
+    expect(shouldSyncPath(".obsidian/app.json", policy)).toBe(false);
+    expect(shouldSyncPath("Notes/A.md", policy)).toBe(true);
     expect(normalizePathKey("/Notes/A.md")).toBe("notes/a.md");
   });
 
@@ -27,6 +32,7 @@ describe("sync planner", () => {
         ],
       ]),
       "/Vaults/Personal",
+      DEFAULT_POLICY,
     );
 
     expect([...remote.keys()]).toEqual(["notes/a.md"]);
@@ -34,6 +40,88 @@ describe("sync planner", () => {
       pathDisplay: "Notes/A.md",
       pathLower: "notes/a.md",
     });
+  });
+
+  it("filters remote configuration and hidden paths using the same policy as local files", () => {
+    const policy = createSyncPathPolicy({
+      ...DEFAULT_SETTINGS,
+      syncThemes: true,
+    }, ".obsidian");
+    const remote = createRemoteFileSnapshot(
+      new Map([
+        ["/vault/note.md", remoteFile("/Vault/Note.md", "note", "rev-note")],
+        ["/vault/.obsidian/app.json", remoteFile("/Vault/.obsidian/app.json", "app", "rev-app")],
+        ["/vault/.obsidian/themes/example/theme.css", remoteFile("/Vault/.obsidian/themes/example/theme.css", "theme", "rev-theme")],
+        ["/vault/.other/hidden.md", remoteFile("/Vault/.other/hidden.md", "hidden", "rev-hidden")],
+      ]),
+      "/Vault",
+      policy,
+    );
+
+    expect([...remote.keys()].sort()).toEqual([
+      ".obsidian/themes/example/theme.css",
+      "note.md",
+    ]);
+  });
+
+  it("leaves ignored Dropbox files untouched when old tracking data exists", () => {
+    const path = ".obsidian/app.json";
+    const policy = createSyncPathPolicy(DEFAULT_SETTINGS, ".obsidian");
+    const remoteFiles = createRemoteFileSnapshot(
+      new Map([[`/vault/${path}`, remoteFile(`/Vault/${path}`, "hash", "rev")]]),
+      "/Vault",
+      policy,
+    );
+    const previous = filterSyncState(state([synced(path, "hash", "hash", "rev")]), policy);
+    const plan = createSyncPlan({
+      localFiles: new Map(),
+      remoteFiles,
+      state: previous,
+    });
+
+    expect(plan.operations).toEqual([]);
+    expect(plan.summary.remoteDeletes).toBe(0);
+    expect(plan.summary.localDeletes).toBe(0);
+  });
+
+  it("enumerates enabled configuration and hidden directories through the adapter", async () => {
+    const files = new Map<string, ArrayBuffer>([
+      ["Note.md", bytes("note")],
+      [".obsidian/themes/example/theme.css", bytes("theme")],
+      [".claude/CLAUDE.md", bytes("instructions")],
+      [".obsidian/workspace.json", bytes("workspace")],
+    ]);
+    const policy = createSyncPathPolicy({
+      ...DEFAULT_SETTINGS,
+      syncThemes: true,
+      syncExtraHiddenDirs: [".claude"],
+    }, ".obsidian");
+    const vault = {
+      getFiles: () => [{ path: "Note.md", stat: { mtime: 1 } }],
+      readBinary: async (file: { path: string }) => files.get(file.path)!,
+      adapter: {
+        stat: async (path: string) => {
+          const content = files.get(path);
+          if (content) {
+            return { type: "file", ctime: 1, mtime: 1, size: content.byteLength };
+          }
+          const prefix = `${path}/`;
+          return [...files.keys()].some((filePath) => filePath.startsWith(prefix))
+            ? { type: "folder", ctime: 1, mtime: 1, size: 0 }
+            : null;
+        },
+        readBinary: async (path: string) => files.get(path)!,
+        list: async (path: string) => listAdapterPath(files, path),
+      },
+    };
+
+    const snapshots = await scanLocalVault(vault as never, policy);
+
+    expect([...snapshots.keys()].sort()).toEqual([
+      ".claude/claude.md",
+      ".obsidian/themes/example/theme.css",
+      "note.md",
+    ]);
   });
 
   it("plans uploads and downloads for one-sided new files", () => {
@@ -185,6 +273,7 @@ describe("sync planner", () => {
         ["notes/a-copy.md", remoteFile("/Vault/notes/a.md", "hash-b", "rev-b")],
       ]),
       "/Vault",
+      DEFAULT_POLICY,
     );
 
     const plan = createSyncPlan({
@@ -266,4 +355,33 @@ function state(files: SyncedFileState[]): VaultboxSyncState {
     files: Object.fromEntries(files.map((file) => [file.pathLower, file])),
     lastSyncedAt: 1,
   };
+}
+
+function listAdapterPath(files: Map<string, ArrayBuffer>, path: string) {
+  const prefix = `${path}/`;
+  const directFiles = new Set<string>();
+  const directFolders = new Set<string>();
+
+  for (const filePath of files.keys()) {
+    if (!filePath.startsWith(prefix)) {
+      continue;
+    }
+    const relative = filePath.slice(prefix.length);
+    const separator = relative.indexOf("/");
+    if (separator === -1) {
+      directFiles.add(filePath);
+    } else {
+      directFolders.add(`${path}/${relative.slice(0, separator)}`);
+    }
+  }
+
+  return {
+    files: [...directFiles],
+    folders: [...directFolders],
+  };
+}
+
+function bytes(value: string): ArrayBuffer {
+  const encoded = new TextEncoder().encode(value);
+  return encoded.buffer.slice(encoded.byteOffset, encoded.byteOffset + encoded.byteLength);
 }

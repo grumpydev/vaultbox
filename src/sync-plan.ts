@@ -1,6 +1,13 @@
 import type { TFile, Vault } from "obsidian";
 import { normalizeDropboxPath } from "./dropbox";
+import {
+  isAdapterPath,
+  shouldSyncPath,
+  type SyncPathPolicy,
+} from "./sync-policy";
 import type { DropboxFileMetadata, SyncedFileState, VaultboxSyncState } from "./types";
+
+export { shouldSyncPath } from "./sync-policy";
 
 const DROPBOX_HASH_BLOCK_SIZE = 4 * 1024 * 1024;
 
@@ -82,20 +89,22 @@ export interface SyncPlan {
 
 export async function scanLocalVault(
   vault: Vault,
-  configDir: string,
+  policy: SyncPathPolicy,
 ): Promise<Map<string, LocalFileSnapshot>> {
-  const files = vault.getFiles().filter((file) => shouldSyncPath(file.path, configDir));
+  const files = vault.getFiles().filter((file) => shouldSyncPath(file.path, policy));
   const snapshots = new Map<string, LocalFileSnapshot>();
 
   for (const file of files) {
     const content = await vault.readBinary(file);
     const snapshot = await createLocalSnapshot(file, content);
-    const existing = snapshots.get(snapshot.pathLower);
-    if (existing) {
-      snapshots.set(snapshot.pathLower, createLocalCaseConflictSnapshot(existing, snapshot));
-    } else {
-      snapshots.set(snapshot.pathLower, snapshot);
-    }
+    addLocalSnapshot(snapshots, snapshot);
+  }
+
+  for (const allowedPath of policy.allowedConfigPaths) {
+    await scanAdapterPath(vault, snapshots, allowedPath, policy);
+  }
+  for (const hiddenDir of policy.extraHiddenDirs) {
+    await scanAdapterPath(vault, snapshots, hiddenDir, policy);
   }
 
   return snapshots;
@@ -254,6 +263,7 @@ function ancestorPathsInclusive(path: string): string[] {
 export function createRemoteFileSnapshot(
   remoteFiles: Map<string, DropboxFileMetadata>,
   rootPath: string,
+  policy: SyncPathPolicy,
 ): Map<string, DropboxFileMetadata> {
   const root = normalizeDropboxPath(rootPath);
   const rootLower = root.toLowerCase();
@@ -262,6 +272,9 @@ export function createRemoteFileSnapshot(
   for (const remote of remoteFiles.values()) {
     const relativeDisplay = stripRemoteRoot(remote.pathDisplay || remote.pathLower, root);
     const relativeLower = stripRemoteRoot(remote.pathLower, rootLower).toLowerCase();
+    if (!relativeDisplay || !relativeLower || !shouldSyncPath(relativeDisplay, policy)) {
+      continue;
+    }
     const normalized: DropboxFileMetadata = {
       ...remote,
       pathDisplay: relativeDisplay,
@@ -319,19 +332,6 @@ export function isPlanEmpty(plan: SyncPlan): boolean {
     plan.summary.remoteDeletes === 0 &&
     plan.summary.localDeletes === 0 &&
     plan.summary.conflicts === 0;
-}
-
-export function shouldSyncPath(path: string, configDir: string): boolean {
-  const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");
-  if (!normalized || normalized.endsWith("/")) {
-    return false;
-  }
-
-  const parts = normalized.split("/");
-  const normalizedConfigDir = configDir.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
-  return normalized !== normalizedConfigDir &&
-    !normalized.startsWith(`${normalizedConfigDir}/`) &&
-    !parts.includes("");
 }
 
 export function normalizePathKey(path: string): string {
@@ -507,6 +507,53 @@ function createLocalCaseConflictSnapshot(first: LocalFileSnapshot, second: Local
     ...first,
     path: `${first.path}\n${second.path}`,
   };
+}
+
+async function scanAdapterPath(
+  vault: Vault,
+  snapshots: Map<string, LocalFileSnapshot>,
+  path: string,
+  policy: SyncPathPolicy,
+): Promise<void> {
+  if (!shouldSyncPath(path, policy) || !isAdapterPath(path, policy)) {
+    return;
+  }
+
+  const stat = await vault.adapter.stat(path);
+  if (!stat) {
+    return;
+  }
+
+  if (stat.type === "file") {
+    const content = await vault.adapter.readBinary(path);
+    addLocalSnapshot(snapshots, {
+      path,
+      pathLower: normalizePathKey(path),
+      contentHash: await getDropboxContentHash(content),
+      size: content.byteLength,
+      mtime: stat.mtime,
+    });
+    return;
+  }
+
+  const listed = await vault.adapter.list(path);
+  for (const filePath of listed.files) {
+    await scanAdapterPath(vault, snapshots, filePath, policy);
+  }
+  for (const folderPath of listed.folders) {
+    await scanAdapterPath(vault, snapshots, folderPath, policy);
+  }
+}
+
+function addLocalSnapshot(
+  snapshots: Map<string, LocalFileSnapshot>,
+  snapshot: LocalFileSnapshot,
+): void {
+  const existing = snapshots.get(snapshot.pathLower);
+  snapshots.set(
+    snapshot.pathLower,
+    existing ? createLocalCaseConflictSnapshot(existing, snapshot) : snapshot,
+  );
 }
 
 function isLocalCaseConflictSnapshot(snapshot: LocalFileSnapshot): boolean {

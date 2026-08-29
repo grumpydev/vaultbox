@@ -15,7 +15,7 @@ It is built for people who already keep a vault in Dropbox on a desktop machine,
 - Pick an existing Dropbox folder, so desktop users can keep using their current Dropbox workflow.
 - Preview changes with simulation before applying them.
 - Choose manual sync for full control or automatic sync for routine updates.
-- Keep `.obsidian/**` out of sync by default, avoiding token and device-specific settings leaks.
+- Keep Obsidian configuration and hidden directories out of sync by default, with narrow opt-in categories for plugin IDs, themes, snippets, and selected hidden directories.
 - Detect conflicts and stop for a user decision instead of silently overwriting notes.
 
 Vaultbox is deliberately conservative. It plans the sync before applying it, tracks file metadata, treats deletes carefully, rechecks files before changing them, and uses Dropbox `rev` values for guarded remote writes.
@@ -52,7 +52,9 @@ That testing does not remove the need for backups, especially while the plugin i
 
 ## Privacy And Access
 
-Vaultbox enumerates vault files so it can compare local paths with the selected Dropbox folder and decide what needs to sync. It deliberately excludes `.obsidian/**` so plugin settings, tokens, and device-specific Obsidian state are not uploaded as notes.
+Vaultbox enumerates vault files so it can compare local paths with the selected Dropbox folder and decide what needs to sync. Obsidian's configuration directory and hidden directories are excluded by default. Users can separately enable synchronization of `community-plugins.json`, themes, snippets, or explicitly selected top-level hidden directories.
+
+The configuration allowlist is deliberately narrow. Vaultbox never syncs community plugin binaries, plugin `data.json` files, workspace state, or Vaultbox's stored Dropbox tokens. Optional exclusion patterns can remove particular paths or filenames from the enabled configuration and hidden directories.
 
 Vaultbox requests Dropbox file metadata read and file content read/write scopes. The Dropbox app uses Full Dropbox access because the core use case is selecting an existing folder that may already be managed by the Dropbox desktop app. Vaultbox only operates inside the folder you select in settings.
 

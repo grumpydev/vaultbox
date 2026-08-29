@@ -1,10 +1,15 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setRequestUrlMock } from "./mocks/obsidian";
 import { DropboxClient, encodeDropboxApiArg, normalizeDropboxPath } from "../src/dropbox";
 
 describe("DropboxClient", () => {
+  beforeEach(() => {
+    vi.stubGlobal("window", { setTimeout });
+  });
+
   afterEach(() => {
     setRequestUrlMock(null);
+    vi.unstubAllGlobals();
   });
 
   it("normalizes Dropbox folder paths", () => {

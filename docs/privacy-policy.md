@@ -46,7 +46,9 @@ Debug logs are intended for troubleshooting. Vaultbox redacts token-like fields 
 
 Vaultbox reads local Obsidian files so it can compare them with Dropbox and sync changes. Vaultbox may upload, download, modify, or delete files as part of the sync plan shown or executed by the user.
 
-Vaultbox excludes Obsidian's configuration folder from sync. This avoids uploading device-specific Obsidian settings, plugin settings, and stored Dropbox tokens as normal vault files.
+Vaultbox excludes Obsidian's configuration folder and hidden directories from sync by default. Users may explicitly enable synchronization of the community plugin ID list, themes, CSS snippets, or selected top-level hidden directories.
+
+Configuration synchronization uses a narrow allowlist. Vaultbox does not sync community plugin binaries, plugin `data.json` files, workspace state, or Vaultbox's locally stored Dropbox tokens.
 
 ## Information Shared With Third Parties
 

@@ -7,6 +7,7 @@ import {
   type SyncOperation,
   type SyncPlan,
 } from "./sync-plan";
+import { isAdapterPath, shouldSyncPath, type SyncPathPolicy } from "./sync-policy";
 import type { DropboxFileMetadata, SyncedFileState, VaultboxSyncState } from "./types";
 
 const DEFAULT_UPLOAD_CONCURRENCY = 2;
@@ -59,6 +60,7 @@ export async function executeSyncPlan(args: {
   fileManager: FileManager;
   dropbox: SyncDropboxClient;
   rootPath: string;
+  pathPolicy: SyncPathPolicy;
   plan: SyncPlan;
   currentState: VaultboxSyncState;
   uploadConcurrency?: number;
@@ -66,6 +68,12 @@ export async function executeSyncPlan(args: {
 }): Promise<SyncExecutionResult> {
   if (args.plan.conflicts.length > 0) {
     throw new Error(`Cannot sync while ${args.plan.conflicts.length} conflict(s) need review.`);
+  }
+
+  for (const operation of args.plan.operations) {
+    if (!shouldSyncPath(operation.path, args.pathPolicy)) {
+      throw new Error(`Refusing to sync excluded or unsafe path: ${operation.path}`);
+    }
   }
 
   const files = { ...args.currentState.files };
@@ -99,6 +107,7 @@ export async function executeSyncPlan(args: {
           vault: args.vault,
           dropbox: args.dropbox,
           rootPath: args.rootPath,
+          pathPolicy: args.pathPolicy,
           operations: uploadOperations,
           files,
           remoteFolderCache,
@@ -138,13 +147,14 @@ export async function executeSyncPlan(args: {
         fileManager: args.fileManager,
         dropbox: args.dropbox,
         rootPath: args.rootPath,
+        pathPolicy: args.pathPolicy,
         operation,
         files,
         remoteFolderCache,
       });
     } catch (error) {
       throw new SyncExecutionError(
-        error instanceof Error ? error.message : String(error),
+        formatOperationError(operation, error),
         applied,
         {
           files,
@@ -173,6 +183,7 @@ async function uploadLocalFiles(args: {
   vault: Vault;
   dropbox: SyncDropboxClient;
   rootPath: string;
+  pathPolicy: SyncPathPolicy;
   operations: Array<Extract<SyncOperation, { kind: "upload" }>>;
   files: Record<string, SyncedFileState>;
   remoteFolderCache: Set<string>;
@@ -199,6 +210,7 @@ async function uploadLocalFiles(args: {
           vault: args.vault,
           dropbox: args.dropbox,
           rootPath: args.rootPath,
+          pathPolicy: args.pathPolicy,
           operation,
           files: args.files,
           remoteFolderCache: args.remoteFolderCache,
@@ -206,7 +218,7 @@ async function uploadLocalFiles(args: {
         applied += 1;
         args.onUploaded(operation);
       } catch (error) {
-        failure = error;
+        failure = new Error(formatOperationError(operation, error));
         return;
       }
     }
@@ -215,7 +227,7 @@ async function uploadLocalFiles(args: {
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
   if (failure) {
-    throw new UploadRunError(failure instanceof Error ? failure.message : String(failure), applied, failure);
+    throw new UploadRunError(errorMessage(failure), applied, failure);
   }
 
   return applied;
@@ -226,6 +238,7 @@ async function applyOperation(args: {
   fileManager: FileManager;
   dropbox: SyncDropboxClient;
   rootPath: string;
+  pathPolicy: SyncPathPolicy;
   operation: SyncOperation;
   files: Record<string, SyncedFileState>;
   remoteFolderCache: Set<string>;
@@ -265,11 +278,16 @@ async function uploadLocalFile(args: {
   vault: Vault;
   dropbox: SyncDropboxClient;
   rootPath: string;
+  pathPolicy: SyncPathPolicy;
   operation: Extract<SyncOperation, { kind: "upload" }>;
   files: Record<string, SyncedFileState>;
   remoteFolderCache: Set<string>;
 }): Promise<void> {
-  const current = await readLocalSnapshot(args.vault, args.operation.local.path);
+  const current = await readLocalSnapshot(
+    args.vault,
+    args.operation.local.path,
+    isAdapterPath(args.operation.local.path, args.pathPolicy),
+  );
   if (!current || current.snapshot.contentHash !== args.operation.local.contentHash) {
     throw new Error(`Local file changed before upload: ${args.operation.local.path}`);
   }
@@ -296,15 +314,18 @@ async function downloadRemoteFile(args: {
   fileManager: FileManager;
   dropbox: SyncDropboxClient;
   rootPath: string;
+  pathPolicy: SyncPathPolicy;
   operation: Extract<SyncOperation, { kind: "download" }>;
   files: Record<string, SyncedFileState>;
 }): Promise<void> {
   const localPath = args.operation.path;
-  if (args.vault.getFolderByPath(localPath)) {
+  const adapterPath = isAdapterPath(localPath, args.pathPolicy);
+  const adapterStat = adapterPath ? await args.vault.adapter.stat(localPath) : null;
+  if (adapterStat?.type === "folder" || (!adapterPath && args.vault.getFolderByPath(localPath))) {
     throw new Error(`Cannot download ${localPath}; a local folder already exists there.`);
   }
 
-  const existing = await readLocalSnapshot(args.vault, localPath);
+  const existing = await readLocalSnapshot(args.vault, localPath, adapterPath);
 
   if (args.operation.previous) {
     if (!existing || existing.snapshot.contentHash !== args.operation.previous.localContentHash) {
@@ -320,22 +341,27 @@ async function downloadRemoteFile(args: {
     throw new Error(`Dropbox file changed before download: ${localPath}`);
   }
 
-  await ensureParentFolders(args.vault, localPath);
-  const file = args.vault.getFileByPath(localPath);
-  if (file) {
-    try {
-      await args.vault.modifyBinary(file, content);
-    } catch (error) {
-      if (!isFileAlreadyExistsError(error)) {
-        throw error;
-      }
+  if (adapterPath) {
+    await ensureAdapterParentFolders(args.vault, localPath);
+    await args.vault.adapter.writeBinary(localPath, content);
+  } else {
+    await ensureParentFolders(args.vault, localPath);
+    const file = args.vault.getFileByPath(localPath);
+    if (file) {
+      try {
+        await args.vault.modifyBinary(file, content);
+      } catch (error) {
+        if (!isFileAlreadyExistsError(error)) {
+          throw error;
+        }
 
-      await args.fileManager.trashFile(file);
-      await ensureParentFolders(args.vault, localPath);
+        await args.fileManager.trashFile(file);
+        await ensureParentFolders(args.vault, localPath);
+        await args.vault.createBinary(localPath, content);
+      }
+    } else {
       await args.vault.createBinary(localPath, content);
     }
-  } else {
-    await args.vault.createBinary(localPath, content);
   }
 
   args.files[normalizePathKey(localPath)] = {
@@ -351,11 +377,15 @@ async function deleteRemoteFile(args: {
   vault: Vault;
   dropbox: SyncDropboxClient;
   rootPath: string;
+  pathPolicy: SyncPathPolicy;
   operation: Extract<SyncOperation, { kind: "delete-remote" }>;
   files: Record<string, SyncedFileState>;
 }): Promise<void> {
-  const local = args.vault.getFileByPath(args.operation.previous.path);
-  if (local) {
+  const localPath = args.operation.previous.path;
+  const localExists = isAdapterPath(localPath, args.pathPolicy)
+    ? Boolean(await args.vault.adapter.stat(localPath))
+    : Boolean(args.vault.getFileByPath(localPath));
+  if (localExists) {
     throw new Error(`Local file reappeared before Dropbox delete: ${args.operation.previous.path}`);
   }
 
@@ -374,30 +404,57 @@ async function deleteLocalFile(args: {
   fileManager: FileManager;
   dropbox: SyncDropboxClient;
   rootPath: string;
+  pathPolicy: SyncPathPolicy;
   operation: Extract<SyncOperation, { kind: "delete-local" }>;
   files: Record<string, SyncedFileState>;
 }): Promise<void> {
-  const file = args.vault.getFileByPath(args.operation.previous.path);
-  if (!file) {
+  const localPath = args.operation.previous.path;
+  const adapterPath = isAdapterPath(localPath, args.pathPolicy);
+  const current = await readLocalSnapshot(args.vault, localPath, adapterPath);
+  if (!current) {
     delete args.files[args.operation.previous.pathLower];
     return;
   }
 
-  const current = await readLocalSnapshot(args.vault, args.operation.previous.path);
-  if (!current || current.snapshot.contentHash !== args.operation.previous.localContentHash) {
-    throw new Error(`Local file changed before delete: ${args.operation.previous.path}`);
+  if (current.snapshot.contentHash !== args.operation.previous.localContentHash) {
+    throw new Error(`Local file changed before delete: ${localPath}`);
   }
 
-  const remotePath = toDropboxPath(args.rootPath, args.operation.previous.path);
-  await assertRemoteMissing(args.dropbox, remotePath, args.operation.previous.path);
-  await args.fileManager.trashFile(file);
+  const remotePath = toDropboxPath(args.rootPath, localPath);
+  await assertRemoteMissing(args.dropbox, remotePath, localPath);
+  if (adapterPath) {
+    await args.vault.adapter.remove(localPath);
+  } else if (current.file) {
+    await args.fileManager.trashFile(current.file);
+  }
   delete args.files[args.operation.previous.pathLower];
 }
 
 async function readLocalSnapshot(
   vault: Vault,
   path: string,
-): Promise<{ file: TFile; content: ArrayBuffer; snapshot: LocalFileSnapshot } | null> {
+  adapterPath: boolean,
+): Promise<{ file: TFile | null; content: ArrayBuffer; snapshot: LocalFileSnapshot } | null> {
+  if (adapterPath) {
+    const stat = await vault.adapter.stat(path);
+    if (!stat || stat.type !== "file") {
+      return null;
+    }
+
+    const content = await vault.adapter.readBinary(path);
+    return {
+      file: null,
+      content,
+      snapshot: {
+        path,
+        pathLower: normalizePathKey(path),
+        contentHash: await getDropboxContentHash(content),
+        size: content.byteLength,
+        mtime: stat.mtime,
+      },
+    };
+  }
+
   const file = vault.getFileByPath(path);
   if (!file) {
     return null;
@@ -415,6 +472,21 @@ async function readLocalSnapshot(
       mtime: file.stat.mtime,
     },
   };
+}
+
+async function ensureAdapterParentFolders(vault: Vault, path: string): Promise<void> {
+  const parts = path.split("/").slice(0, -1);
+  let current = "";
+
+  for (const part of parts) {
+    current = current ? `${current}/${part}` : part;
+    const stat = await vault.adapter.stat(current);
+    if (!stat) {
+      await vault.adapter.mkdir(current);
+    } else if (stat.type !== "folder") {
+      throw new Error(`Cannot create folder ${current}; a file already exists there.`);
+    }
+  }
 }
 
 async function ensureParentFolders(vault: Vault, path: string): Promise<void> {
@@ -530,4 +602,16 @@ function isDropboxNotFoundError(error: Error): boolean {
 
 function isFileAlreadyExistsError(error: unknown): boolean {
   return error instanceof Error && /file already exists/i.test(error.message);
+}
+
+function formatOperationError(operation: SyncOperation, error: unknown): string {
+  const message = errorMessage(error);
+  return `${operation.kind} ${operation.path} failed: ${message}`;
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return typeof error === "string" ? error : "Unknown error";
 }

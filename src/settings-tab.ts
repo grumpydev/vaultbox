@@ -1,4 +1,5 @@
 import { App, Modal, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
+import { getValidExcludePatterns, getValidExtraHiddenDirs } from "./sync-policy";
 import type { DropboxFolderMetadata } from "./types";
 import type VaultboxPlugin from "./main";
 
@@ -104,6 +105,7 @@ export class VaultboxSettingTab extends PluginSettingTab {
       });
 
     this.addSyncSettings(containerEl);
+    this.addConfigurationSyncSettings(containerEl);
     this.addDebugSettings(containerEl);
     this.addSupport(containerEl);
     this.addActions(containerEl);
@@ -251,6 +253,85 @@ export class VaultboxSettingTab extends PluginSettingTab {
     preview.value = this.plugin.getDebugLogText();
   }
 
+  private addConfigurationSyncSettings(containerEl: HTMLElement): void {
+    const configDir = this.app.vault.configDir;
+
+    new Setting(containerEl)
+      .setName("Configuration sync")
+      .setHeading();
+
+    new Setting(containerEl)
+      .setName("Community plugin list")
+      .setDesc(`Sync ${configDir}/community-plugins.json. Plugin settings, plugin binaries, and stored tokens are never included.`)
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.syncCommunityPlugins)
+          .onChange(async (value) => {
+            this.plugin.settings.syncCommunityPlugins = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Themes")
+      .setDesc(`Sync files under ${configDir}/themes.`)
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.syncThemes)
+          .onChange(async (value) => {
+            this.plugin.settings.syncThemes = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("CSS snippets")
+      .setDesc(`Sync files under ${configDir}/snippets.`)
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.syncSnippets)
+          .onChange(async (value) => {
+            this.plugin.settings.syncSnippets = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Extra hidden directories")
+      .setDesc("Enter one top-level hidden directory per line. Reserved and nested paths are ignored.")
+      .addTextArea((textArea) => {
+        textArea
+          .setValue(this.plugin.settings.syncExtraHiddenDirs.join("\n"))
+          .setPlaceholder("Hidden directory names")
+          .onChange(async (value) => {
+            this.plugin.settings.syncExtraHiddenDirs = value
+              .split("\n")
+              .map((entry) => entry.trim())
+              .filter(Boolean);
+            this.plugin.settings.syncExtraHiddenDirs = getValidExtraHiddenDirs(
+              this.plugin.settings,
+              configDir,
+            );
+            await this.plugin.saveSettings();
+          });
+        textArea.inputEl.rows = 4;
+      });
+
+    new Setting(containerEl)
+      .setName("Hidden-path exclusions")
+      .setDesc("One path prefix or filename per line. These exclusions apply only inside the configuration and hidden directories enabled above.")
+      .addTextArea((textArea) => {
+        textArea
+          .setValue(this.plugin.settings.syncExcludePaths.join("\n"))
+          .setPlaceholder(`${configDir}/themes/example\ndata.json`)
+          .onChange(async (value) => {
+            this.plugin.settings.syncExcludePaths = getValidExcludePatterns(value.split("\n"));
+            await this.plugin.saveSettings();
+          });
+        textArea.inputEl.rows = 4;
+      });
+  }
+
   private addActions(containerEl: HTMLElement): void {
     new Setting(containerEl)
       .setName("Simulate sync")
@@ -360,7 +441,9 @@ class DropboxFolderPickerModal extends Modal {
     const createFromInput = async () => {
       await this.createFolder(input.value);
     };
-    createButton.addEventListener("click", createFromInput);
+    createButton.addEventListener("click", () => {
+      void createFromInput();
+    });
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
@@ -380,14 +463,15 @@ class DropboxFolderPickerModal extends Modal {
       text: "Choose this folder",
     });
     chooseButton.disabled = !this.currentPath;
-    chooseButton.addEventListener("click", async () => {
+    chooseButton.addEventListener("click", () => {
       if (!this.currentPath) {
         this.setStatus("Choose a folder below the Dropbox root.");
         return;
       }
 
-      await this.onChoose(this.currentPath);
-      this.close();
+      void this.onChoose(this.currentPath).then(() => {
+        this.close();
+      });
     });
 
     actions.createEl("button", { text: "Cancel" }).addEventListener("click", () => {
