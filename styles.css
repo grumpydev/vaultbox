@@ -51,6 +51,7 @@
   color: var(--text-muted);
   line-height: 1.5;
   margin: 0 0 12px;
+  white-space: pre-wrap;
 }
 
 .vaultbox-modal-actions {

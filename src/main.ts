@@ -4,6 +4,7 @@ import {
   exchangeDropboxAuthCode,
   refreshDropboxAccessToken,
 } from "./dropbox-auth";
+import { requestConfirmation } from "./confirmation-modal";
 import { DROPBOX_APP_KEY } from "./constants";
 import { DebugLog, type DebugLogEntry } from "./debug-log";
 import { DropboxClient, normalizeDropboxPath } from "./dropbox";
@@ -272,7 +273,11 @@ export default class VaultboxPlugin extends Plugin {
       if (this.settings.syncMode === "manual" && this.settings.confirmBeforeManualSync) {
         progressNotice.hide();
         progressNotice = null;
-        const confirmed = window.confirm(`${formatSyncPlan(plan, "Confirm sync")}\n\nApply these changes now?`);
+        const confirmed = await requestConfirmation(this.app, {
+          title: "Confirm sync",
+          message: `${formatSyncPlan(plan, "Planned changes")}\n\nApply these changes now?`,
+          confirmText: "Sync now",
+        });
         if (!confirmed) {
           new Notice("Sync cancelled.");
           return;

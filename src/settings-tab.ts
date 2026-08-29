@@ -1,4 +1,5 @@
 import { App, Modal, Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
+import { requestConfirmation } from "./confirmation-modal";
 import { getValidExcludePatterns, getValidExtraHiddenDirs } from "./sync-policy";
 import type { DropboxFolderMetadata } from "./types";
 import type VaultboxPlugin from "./main";
@@ -196,14 +197,14 @@ export class VaultboxSettingTab extends PluginSettingTab {
         button
           .setButtonText("Reset tracking")
           .onClick(async () => {
-            const confirmed = window.confirm(
-              [
-                "Reset Vaultbox sync tracking?",
-                "",
+            const confirmed = await requestConfirmation(this.app, {
+              title: "Reset sync tracking?",
+              message: [
                 "This will not delete local files or Dropbox files.",
                 "The next sync will treat this vault and the selected Dropbox folder as a fresh setup.",
-              ].join("\n"),
-            );
+              ].join("\n\n"),
+              confirmText: "Reset tracking",
+            });
             if (!confirmed) {
               return;
             }
