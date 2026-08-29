@@ -1,7 +1,7 @@
 {
   "id": "vaultbox",
   "name": "Vaultbox",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "minAppVersion": "1.12.3",
   "description": "Sync your vault directly with a selected Dropbox folder on desktop and mobile.",
   "author": "grumpydev",
