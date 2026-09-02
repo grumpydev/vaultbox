@@ -477,6 +477,66 @@ describe("sync executor", () => {
     ).rejects.toThrow(/Cannot sync/);
   });
 
+  it("refuses multiple changes targeting Unicode-equivalent paths", async () => {
+    const composedPath = "Notes/Caf\u00e9.png";
+    const decomposedPath = "Notes/Cafe\u0301.png";
+    const contentHash = await hash("content");
+    const previous = synced(decomposedPath, contentHash, contentHash, "rev-old");
+    const dropbox = new FakeDropbox({});
+
+    await expect(executeSyncPlan({
+      vault: new FakeVault({ [composedPath]: "content" }).asVault(),
+      dropbox,
+      rootPath: "/Vault",
+      currentState: state([previous]),
+      plan: plan([
+        {
+          kind: "upload",
+          path: composedPath,
+          local: localFile(composedPath, contentHash),
+        },
+        {
+          kind: "delete-remote",
+          path: decomposedPath,
+          remote: remoteFile(decomposedPath, contentHash, "rev-old"),
+          previous,
+        },
+      ]),
+    })).rejects.toThrow(/multiple sync changes for the same path/i);
+
+    expect(dropbox.upload).not.toHaveBeenCalled();
+    expect(dropbox.delete).not.toHaveBeenCalled();
+  });
+
+  it("rewrites legacy Unicode state keys after a no-op recovery sync", async () => {
+    const composedPath = "Notes/Caf\u00e9.png";
+    const decomposedPath = "Notes/Cafe\u0301.png";
+    const contentHash = await hash("content");
+    const previous = synced(decomposedPath, contentHash, contentHash, "rev-old");
+    const local = localFile(composedPath, contentHash);
+    const remote = remoteFile(decomposedPath, contentHash, "rev-old");
+
+    const result = await executeSyncPlan({
+      vault: new FakeVault({ [composedPath]: "content" }).asVault(),
+      dropbox: new FakeDropbox({}),
+      rootPath: "/Vault",
+      currentState: {
+        files: { [decomposedPath.toLowerCase()]: previous },
+        lastSyncedAt: 1,
+      },
+      plan: plan([{
+        kind: "noop",
+        path: composedPath,
+        local,
+        remote,
+        previous,
+      }]),
+    });
+
+    expect(Object.keys(result.state.files)).toEqual([normalizePathKey(composedPath)]);
+    expect(result.state.files[normalizePathKey(composedPath)]?.pathLower).toBe(normalizePathKey(composedPath));
+  });
+
   it("returns partial state for operations completed before a later failure", async () => {
     const firstHash = await hash("first");
     const secondHash = await hash("second");

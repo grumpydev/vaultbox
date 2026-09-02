@@ -14,14 +14,17 @@ import {
   type SyncConflictType,
   type SyncPlan,
 } from "../src/sync-plan";
-import type { DropboxFileMetadata, VaultboxSyncState } from "../src/types";
+import { createSyncPathPolicy } from "../src/sync-policy";
+import { DEFAULT_SETTINGS, type DropboxFileMetadata, type VaultboxSyncState } from "../src/types";
 import { setRequestUrlMock } from "../tests/mocks/obsidian";
 
 type ExecuteSyncPlanArgs = Parameters<typeof executeSyncPlanRaw>[0];
+const DEFAULT_POLICY = createSyncPathPolicy(DEFAULT_SETTINGS, ".obsidian");
 
-function executeSyncPlan(args: Omit<ExecuteSyncPlanArgs, "fileManager">): ReturnType<typeof executeSyncPlanRaw> {
+function executeSyncPlan(args: Omit<ExecuteSyncPlanArgs, "fileManager" | "pathPolicy">): ReturnType<typeof executeSyncPlanRaw> {
   return executeSyncPlanRaw({
     ...args,
+    pathPolicy: DEFAULT_POLICY,
     fileManager: {
       trashFile: async (file: TFile) => {
         await args.vault.delete(file);
@@ -187,7 +190,7 @@ describe("live Dropbox sync engine E2E", () => {
       "case.md": "b",
     });
     const localCasePlan = createSyncPlan({
-      localFiles: await scanLocalVault(localCaseVault.asVault(), ".obsidian"),
+      localFiles: await scanLocalVault(localCaseVault.asVault(), DEFAULT_POLICY),
       remoteFiles: new Map(),
       state: emptyState(),
     });
@@ -202,11 +205,33 @@ describe("live Dropbox sync engine E2E", () => {
           ["two", remoteFile("/Vault/case.md", hash, "rev-b")],
         ]),
         "/Vault",
+        DEFAULT_POLICY,
       ),
       state: emptyState(),
     });
     expect(remoteCasePlan.conflicts.map((conflict) => conflict.type)).toContain("remote-case-conflict");
   });
+
+  it("treats Unicode-equivalent local and Dropbox paths as one file", async () => {
+    const root = joinDropboxPath(runRoot, "unicode-paths");
+    await ensureDropboxFolder(client, root);
+    const composedPath = "Notes/Caf\u00e9.png";
+    const decomposedPath = "Notes/Cafe\u0301.png";
+    const content = "same content\n";
+    const vault = new FakeVault({ [composedPath]: content });
+    await uploadText(client, root, decomposedPath, content);
+
+    const plan = await buildPlan(vault, root, emptyState(), client);
+
+    expect(plan.summary).toMatchObject({
+      uploads: 0,
+      downloads: 0,
+      remoteDeletes: 0,
+      localDeletes: 0,
+      noops: 1,
+      conflicts: 0,
+    });
+  }, 60_000);
 
   async function expectLiveConflict(
     name: string,
@@ -253,12 +278,12 @@ async function buildPlan(
   client: DropboxClient,
 ): Promise<SyncPlan> {
   const [localFiles, remoteFiles] = await Promise.all([
-    scanLocalVault(vault.asVault(), ".obsidian"),
+    scanLocalVault(vault.asVault(), DEFAULT_POLICY),
     client.listAllFiles(rootPath),
   ]);
   return createSyncPlan({
     localFiles,
-    remoteFiles: createRemoteFileSnapshot(remoteFiles, rootPath),
+    remoteFiles: createRemoteFileSnapshot(remoteFiles, rootPath, DEFAULT_POLICY),
     state,
   });
 }

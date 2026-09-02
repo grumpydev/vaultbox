@@ -24,6 +24,8 @@ export type SyncConflictType =
   | "remote-case-conflict"
   | "path-shape-conflict"
   | "path-case-mismatch"
+  | "sync-state-path-conflict"
+  | "duplicate-operation-target"
   | "both-new"
   | "both-modified"
   | "local-delete-remote-edit"
@@ -125,9 +127,8 @@ export function createSyncPlan(args: {
   remoteFiles: Map<string, DropboxFileMetadata>;
   state?: VaultboxSyncState;
 }): SyncPlan {
-  const previousFiles = new Map(Object.entries(args.state?.files ?? {}));
   const operations: SyncOperation[] = [];
-  const conflicts: SyncConflict[] = [];
+  const { files: previousFiles, conflicts } = createPreviousFileMap(args.state);
   const allKeys = new Set([
     ...args.localFiles.keys(),
     ...args.remoteFiles.keys(),
@@ -172,7 +173,7 @@ export function createSyncPlan(args: {
       continue;
     }
 
-    if (local && remote && local.path !== remoteRelativePath(remote)) {
+    if (local && remote && normalizeDisplayPath(local.path) !== normalizeDisplayPath(remoteRelativePath(remote))) {
       conflicts.push({
         kind: "conflict",
         type: "path-case-mismatch",
@@ -192,6 +193,8 @@ export function createSyncPlan(args: {
 
     planWithPrevious(pathLower, previous, local, remote, operations, conflicts);
   }
+
+  conflicts.push(...findDuplicateOperationTargets(operations));
 
   return {
     operations,
@@ -335,7 +338,7 @@ export function isPlanEmpty(plan: SyncPlan): boolean {
 }
 
 export function normalizePathKey(path: string): string {
-  return path.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
+  return normalizeDisplayPath(path).toLowerCase();
 }
 
 export function remoteRelativePath(remote: DropboxFileMetadata): string {
@@ -474,6 +477,73 @@ function planWithPrevious(
     remote,
     previous,
   });
+}
+
+function createPreviousFileMap(state: VaultboxSyncState | undefined): {
+  files: Map<string, SyncedFileState>;
+  conflicts: SyncConflict[];
+} {
+  const files = new Map<string, SyncedFileState>();
+  const conflicts: SyncConflict[] = [];
+
+  for (const previous of Object.values(state?.files ?? {})) {
+    const pathLower = normalizePathKey(previous.path);
+    const normalized = { ...previous, pathLower };
+    const existing = files.get(pathLower);
+
+    if (existing && !sameSyncedState(existing, normalized)) {
+      conflicts.push({
+        kind: "conflict",
+        type: "sync-state-path-conflict",
+        path: pathLower,
+        message: `Sync history contains multiple entries for ${previous.path}. Reset sync history before syncing.`,
+        previous: normalized,
+        paths: [existing.path, previous.path],
+      });
+      continue;
+    }
+
+    files.set(pathLower, normalized);
+  }
+
+  return { files, conflicts };
+}
+
+function findDuplicateOperationTargets(operations: SyncOperation[]): SyncConflict[] {
+  const targets = new Map<string, SyncOperation>();
+  const conflicts = new Map<string, SyncConflict>();
+
+  for (const operation of operations) {
+    if (operation.kind === "noop") {
+      continue;
+    }
+
+    const target = normalizePathKey(operation.path);
+    const existing = targets.get(target);
+    if (existing && !conflicts.has(target)) {
+      conflicts.set(target, {
+        kind: "conflict",
+        type: "duplicate-operation-target",
+        path: target,
+        message: `Multiple sync changes target ${operation.path}. Sync has been blocked to protect this file.`,
+        paths: [existing.path, operation.path],
+      });
+    } else if (!existing) {
+      targets.set(target, operation);
+    }
+  }
+
+  return [...conflicts.values()];
+}
+
+function sameSyncedState(first: SyncedFileState, second: SyncedFileState): boolean {
+  return first.localContentHash === second.localContentHash &&
+    first.remoteContentHash === second.remoteContentHash &&
+    first.remoteRev === second.remoteRev;
+}
+
+function normalizeDisplayPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\/+/, "").normalize("NFC");
 }
 
 function summarizePlan(operations: SyncOperation[], conflicts: SyncConflict[]): SyncPlanSummary {

@@ -76,7 +76,8 @@ export async function executeSyncPlan(args: {
     }
   }
 
-  const files = { ...args.currentState.files };
+  assertUniqueChangeTargets(args.plan.operations);
+  const files = canonicalizeStateFiles(args.currentState.files);
   const remoteFolderCache = new Set<string>();
   const total = args.plan.operations.filter((operation) => operation.kind !== "noop").length;
   let completed = 0;
@@ -177,6 +178,43 @@ export async function executeSyncPlan(args: {
       lastSyncedAt: Date.now(),
     },
   };
+}
+
+function assertUniqueChangeTargets(operations: SyncOperation[]): void {
+  const targets = new Set<string>();
+
+  for (const operation of operations) {
+    if (operation.kind === "noop") {
+      continue;
+    }
+
+    const target = normalizePathKey(operation.path);
+    if (targets.has(target)) {
+      throw new Error(`Refusing multiple sync changes for the same path: ${operation.path}`);
+    }
+    targets.add(target);
+  }
+}
+
+function canonicalizeStateFiles(files: Record<string, SyncedFileState>): Record<string, SyncedFileState> {
+  const canonical: Record<string, SyncedFileState> = {};
+
+  for (const file of Object.values(files)) {
+    const pathLower = normalizePathKey(file.path);
+    const existing = canonical[pathLower];
+    if (existing && !sameSyncedState(existing, file)) {
+      throw new Error(`Sync history contains conflicting entries for ${file.path}. Reset sync history before syncing.`);
+    }
+    canonical[pathLower] = { ...file, pathLower };
+  }
+
+  return canonical;
+}
+
+function sameSyncedState(first: SyncedFileState, second: SyncedFileState): boolean {
+  return first.localContentHash === second.localContentHash &&
+    first.remoteContentHash === second.remoteContentHash &&
+    first.remoteRev === second.remoteRev;
 }
 
 async function uploadLocalFiles(args: {
