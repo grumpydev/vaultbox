@@ -296,6 +296,61 @@ describe("sync planner", () => {
     expect(plan.summary.noops).toBe(1);
   });
 
+  it("canonicalizes Unicode-equivalent paths after an interrupted sync", () => {
+    const composedPath = "Notes/Caf\u00e9.png";
+    const decomposedPath = "Notes/Cafe\u0301.png";
+    const previous = synced(decomposedPath, "hash", "hash", "rev");
+    const plan = createSyncPlan({
+      state: {
+        files: { [decomposedPath.toLowerCase()]: previous },
+        lastSyncedAt: 1,
+      },
+      localFiles: localMap(localFile(composedPath, "hash")),
+      remoteFiles: remoteMap(remoteFile(decomposedPath, "hash", "rev")),
+    });
+
+    expect(normalizePathKey(composedPath)).toBe(normalizePathKey(decomposedPath));
+    expect(plan.summary).toMatchObject({
+      uploads: 0,
+      remoteDeletes: 0,
+      noops: 1,
+      conflicts: 0,
+    });
+  });
+
+  it("blocks conflicting sync history entries for one canonical path", () => {
+    const composed = synced("Notes/Caf\u00e9.png", "old-a", "old-a", "rev-a");
+    const decomposed = synced("Notes/Cafe\u0301.png", "old-b", "old-b", "rev-b");
+    const plan = createSyncPlan({
+      state: {
+        files: {
+          composed,
+          decomposed,
+        },
+        lastSyncedAt: 1,
+      },
+      localFiles: new Map(),
+      remoteFiles: new Map(),
+    });
+
+    expect(plan.summary.conflicts).toBe(1);
+    expect(plan.conflicts[0]?.type).toBe("sync-state-path-conflict");
+    expect(plan.operations).toEqual([]);
+  });
+
+  it("blocks multiple planned changes for one canonical target", () => {
+    const path = "Notes/A.png";
+    const local = { ...localFile(path, "local"), pathLower: "local-slot" };
+    const remote = { ...remoteFile(path, "remote", "rev"), pathLower: "remote-slot" };
+    const plan = createSyncPlan({
+      localFiles: new Map([[local.pathLower, local]]),
+      remoteFiles: new Map([[remote.pathLower, remote]]),
+    });
+
+    expect(plan.summary.conflicts).toBe(1);
+    expect(plan.conflicts[0]?.type).toBe("duplicate-operation-target");
+  });
+
   it("uses Dropbox content hashes for local content comparisons", async () => {
     const first = await getDropboxContentHash(new TextEncoder().encode("same").buffer);
     const second = await getDropboxContentHash(new TextEncoder().encode("same").buffer);
