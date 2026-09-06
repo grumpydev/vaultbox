@@ -233,6 +233,39 @@ describe("live Dropbox sync engine E2E", () => {
     });
   }, 60_000);
 
+  it("blocks visually equivalent upload and remote delete paths", async () => {
+    const root = joinDropboxPath(runRoot, "visual-path-collision");
+    await ensureDropboxFolder(client, root);
+    const localPath = "Notes/Example File.png";
+    const remotePath = "Notes/Example\u00a0File.png";
+    const content = "same content\n";
+    const vault = new FakeVault({ [localPath]: content });
+    const uploaded = await uploadText(client, root, remotePath, content);
+    const previous = {
+      path: remotePath,
+      pathLower: normalizePathKey(remotePath),
+      localContentHash: uploaded.contentHash,
+      remoteContentHash: uploaded.contentHash,
+      remoteRev: uploaded.rev,
+    };
+    const state: VaultboxSyncState = {
+      files: { [previous.pathLower]: previous },
+      lastSyncedAt: Date.now(),
+    };
+
+    const plan = await buildPlan(vault, root, state, client);
+
+    expect(plan.summary).toMatchObject({ uploads: 1, remoteDeletes: 1, conflicts: 1 });
+    expect(plan.conflicts.map((conflict) => conflict.type)).toContain("duplicate-operation-target");
+    await expect(executeSyncPlan({
+      vault: vault.asVault(),
+      dropbox: client,
+      rootPath: root,
+      plan,
+      currentState: state,
+    })).rejects.toThrow(/conflict/);
+  }, 60_000);
+
   async function expectLiveConflict(
     name: string,
     expected: SyncConflictType,

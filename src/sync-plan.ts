@@ -89,6 +89,20 @@ export interface SyncPlan {
   summary: SyncPlanSummary;
 }
 
+export interface MutationPathDiagnostic {
+  kind: "upload" | "delete-remote";
+  path: string;
+  codePoints: string;
+  identityKey: string;
+  visualSafetyKey: string;
+}
+
+export interface MutationPathDiagnostics {
+  total: number;
+  omitted: number;
+  operations: MutationPathDiagnostic[];
+}
+
 export async function scanLocalVault(
   vault: Vault,
   policy: SyncPathPolicy,
@@ -341,6 +355,37 @@ export function normalizePathKey(path: string): string {
   return normalizeDisplayPath(path).toLowerCase();
 }
 
+export function normalizePathSafetyKey(path: string): string {
+  return normalizeDisplayPath(path)
+    .normalize("NFKC")
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, "")
+    .replace(/\p{White_Space}+/gu, " ")
+    .toLowerCase();
+}
+
+export function getMutationPathDiagnostics(plan: SyncPlan, limit = 20): MutationPathDiagnostics {
+  const relevant = plan.operations
+    .filter((operation): operation is Extract<SyncOperation, { kind: "upload" | "delete-remote" }> =>
+      operation.kind === "upload" || operation.kind === "delete-remote");
+  const operations = relevant
+    .slice(0, Math.max(0, limit))
+    .map((operation) => ({
+      kind: operation.kind,
+      path: operation.path,
+      codePoints: [...operation.path]
+        .map((character) => `U+${character.codePointAt(0)?.toString(16).toUpperCase().padStart(4, "0")}`)
+        .join(" "),
+      identityKey: normalizePathKey(operation.path),
+      visualSafetyKey: normalizePathSafetyKey(operation.path),
+    }));
+
+  return {
+    total: relevant.length,
+    omitted: relevant.length - operations.length,
+    operations,
+  };
+}
+
 export function remoteRelativePath(remote: DropboxFileMetadata): string {
   return normalizeDropboxPath(remote.pathDisplay || remote.pathLower).replace(/^\/+/, "");
 }
@@ -518,7 +563,7 @@ function findDuplicateOperationTargets(operations: SyncOperation[]): SyncConflic
       continue;
     }
 
-    const target = normalizePathKey(operation.path);
+    const target = normalizePathSafetyKey(operation.path);
     const existing = targets.get(target);
     if (existing && !conflicts.has(target)) {
       conflicts.set(target, {

@@ -4,7 +4,9 @@ import {
   createSyncPlan,
   formatSyncPlan,
   getDropboxContentHash,
+  getMutationPathDiagnostics,
   normalizePathKey,
+  normalizePathSafetyKey,
   scanLocalVault,
   shouldSyncPath,
   type LocalFileSnapshot,
@@ -349,6 +351,44 @@ describe("sync planner", () => {
 
     expect(plan.summary.conflicts).toBe(1);
     expect(plan.conflicts[0]?.type).toBe("duplicate-operation-target");
+  });
+
+  it("blocks upload and remote delete paths separated by compatibility whitespace", () => {
+    const localPath = "Notes/Example File.png";
+    const remotePath = "Notes/Example\u00a0File.png";
+    const previous = synced(remotePath, "hash", "hash", "rev");
+    const plan = createSyncPlan({
+      state: state([previous]),
+      localFiles: localMap(localFile(localPath, "hash")),
+      remoteFiles: remoteMap(remoteFile(remotePath, "hash", "rev")),
+    });
+
+    expect(normalizePathKey(localPath)).not.toBe(normalizePathKey(remotePath));
+    expect(normalizePathSafetyKey(localPath)).toBe(normalizePathSafetyKey(remotePath));
+    expect(plan.summary).toMatchObject({ uploads: 1, remoteDeletes: 1, conflicts: 1 });
+    expect(plan.conflicts[0]?.type).toBe("duplicate-operation-target");
+
+    const diagnostics = getMutationPathDiagnostics(plan);
+    expect(diagnostics).toMatchObject({ total: 2, omitted: 0 });
+    expect(diagnostics.operations[1]?.codePoints).toContain("U+00A0");
+    expect(diagnostics.operations[0]?.visualSafetyKey).toBe(diagnostics.operations[1]?.visualSafetyKey);
+  });
+
+  it("limits mutation path diagnostics for large plans", () => {
+    const plan = createSyncPlan({
+      localFiles: localMap(
+        localFile("A.md", "a"),
+        localFile("B.md", "b"),
+        localFile("C.md", "c"),
+      ),
+      remoteFiles: new Map(),
+    });
+
+    expect(getMutationPathDiagnostics(plan, 2)).toMatchObject({
+      total: 3,
+      omitted: 1,
+      operations: [{ path: "A.md" }, { path: "B.md" }],
+    });
   });
 
   it("uses Dropbox content hashes for local content comparisons", async () => {

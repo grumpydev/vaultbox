@@ -3,6 +3,7 @@ import { normalizeDropboxPath } from "./dropbox";
 import {
   getDropboxContentHash,
   normalizePathKey,
+  normalizePathSafetyKey,
   type LocalFileSnapshot,
   type SyncOperation,
   type SyncPlan,
@@ -188,7 +189,7 @@ function assertUniqueChangeTargets(operations: SyncOperation[]): void {
       continue;
     }
 
-    const target = normalizePathKey(operation.path);
+    const target = normalizePathSafetyKey(operation.path);
     if (targets.has(target)) {
       throw new Error(`Refusing multiple sync changes for the same path: ${operation.path}`);
     }

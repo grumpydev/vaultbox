@@ -508,6 +508,37 @@ describe("sync executor", () => {
     expect(dropbox.delete).not.toHaveBeenCalled();
   });
 
+  it("refuses multiple changes targeting visually equivalent paths", async () => {
+    const localPath = "Notes/Example File.png";
+    const remotePath = "Notes/Example\u00a0File.png";
+    const contentHash = await hash("content");
+    const previous = synced(remotePath, contentHash, contentHash, "rev-old");
+    const dropbox = new FakeDropbox({});
+
+    await expect(executeSyncPlan({
+      vault: new FakeVault({ [localPath]: "content" }).asVault(),
+      dropbox,
+      rootPath: "/Vault",
+      currentState: state([previous]),
+      plan: plan([
+        {
+          kind: "upload",
+          path: localPath,
+          local: localFile(localPath, contentHash),
+        },
+        {
+          kind: "delete-remote",
+          path: remotePath,
+          remote: remoteFile(remotePath, contentHash, "rev-old"),
+          previous,
+        },
+      ]),
+    })).rejects.toThrow(/multiple sync changes for the same path/i);
+
+    expect(dropbox.upload).not.toHaveBeenCalled();
+    expect(dropbox.delete).not.toHaveBeenCalled();
+  });
+
   it("rewrites legacy Unicode state keys after a no-op recovery sync", async () => {
     const composedPath = "Notes/Caf\u00e9.png";
     const decomposedPath = "Notes/Cafe\u0301.png";
