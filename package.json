@@ -1,6 +1,6 @@
 {
   "name": "vaultbox",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Sync your vault directly with a selected Dropbox folder on desktop and mobile.",
   "main": "main.js",
   "scripts": {
