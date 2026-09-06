@@ -16,6 +16,7 @@ import {
   createRemoteFileSnapshot,
   createSyncPlan,
   formatSyncPlan,
+  getMutationPathDiagnostics,
   isPlanEmpty,
   scanLocalVault,
   type SyncPlan,
@@ -244,12 +245,14 @@ export default class VaultboxPlugin extends Plugin {
 
     try {
       this.debugLog.write("sync.start", {
+        version: this.manifest.version,
         folderPath: this.settings.selectedFolderPath,
         confirm: this.settings.syncMode === "manual" && this.settings.confirmBeforeManualSync,
       });
       this.settings.lastSyncStartedAt = Date.now();
       progressNotice = new Notice("Vaultbox: preparing sync plan...", 0);
       const plan = await this.buildSyncPlan();
+      this.writeMutationPathDiagnostics("sync.plan-paths", plan);
       if (plan.conflicts.length > 0) {
         const message = formatSyncPlan(plan, "Sync blocked");
         this.settings.lastSyncSummary = message;
@@ -329,9 +332,11 @@ export default class VaultboxPlugin extends Plugin {
   async simulateSync(): Promise<void> {
     try {
       this.debugLog.write("simulation.start", {
+        version: this.manifest.version,
         folderPath: this.settings.selectedFolderPath,
       });
       const plan = await this.buildSyncPlan();
+      this.writeMutationPathDiagnostics("simulation.plan-paths", plan);
       const message = formatSyncPlan(plan);
       this.settings.lastSyncCompletedAt = Date.now();
       this.settings.lastSyncSummary = message;
@@ -371,6 +376,13 @@ export default class VaultboxPlugin extends Plugin {
       remoteFiles: createRemoteFileSnapshot(remoteFiles, folderPath, pathPolicy),
       state: filterSyncState(this.syncState, pathPolicy),
     });
+  }
+
+  private writeMutationPathDiagnostics(message: string, plan: SyncPlan): void {
+    const diagnostics = getMutationPathDiagnostics(plan);
+    if (diagnostics.total > 0) {
+      this.debugLog.write(message, diagnostics);
+    }
   }
 }
 
