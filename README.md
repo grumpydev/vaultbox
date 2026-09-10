@@ -32,7 +32,9 @@ Vaultbox supports two main workflows.
 
 **Automatic sync** can run on startup, on an interval, or both. It uses the same planning engine as manual sync, but applies safe plans without asking each time.
 
-The settings screen also includes **Simulate sync**. Simulation builds the same plan as a real sync and reports what would happen without changing local files, Dropbox files, or Vaultbox metadata. It is useful before first sync, after changing Dropbox folders, and any time the vault state feels uncertain.
+The settings screen also includes **Simulate sync**. Simulation builds the same plan as a real sync without applying file changes or advancing sync tracking. It is useful before first sync, after changing Dropbox folders, and any time the vault state feels uncertain.
+
+Simulation opens a complete, read-only report, grouped into local deletes, remote deletes, uploads, downloads, no-ops, and conflicts. No paths are truncated. Use the copy icon to copy the report, or **Select all** and your device's copy action if clipboard access is unavailable. **View simulation report** beside **Last sync** reopens the snapshot during the current plugin session. A new simulation, a sync attempt, or resetting tracking clears the previous report. The report includes the scan time, plugin version, and Dropbox folder; it is not a live preview, so simulate again after making changes. Reports contain filenames and folder paths: review them for private information before sharing. They do not include file contents or authentication credentials.
 
 ## First Sync Performance
 

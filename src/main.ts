@@ -10,6 +10,8 @@ import { DebugLog, type DebugLogEntry } from "./debug-log";
 import { DropboxClient, normalizeDropboxPath } from "./dropbox";
 import { VAULTBOX_ICON_PATHS } from "./icons";
 import { VaultboxSettingTab } from "./settings-tab";
+import { formatCompleteSyncReport } from "./sync-report";
+import { SyncReportModal } from "./sync-report-modal";
 import { executeSyncPlan, SyncExecutionError } from "./sync-executor";
 import { createSyncPathPolicy, filterSyncState, type SyncPathPolicy } from "./sync-policy";
 import {
@@ -36,6 +38,7 @@ export default class VaultboxPlugin extends Plugin {
   syncState: VaultboxSyncState = { files: {}, lastSyncedAt: 0 };
   private ribbonIconEl: HTMLElement | null = null;
   private debugLog!: DebugLog;
+  private simulationReport = "";
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -148,6 +151,7 @@ export default class VaultboxPlugin extends Plugin {
   }
 
   async resetSyncState(): Promise<void> {
+    this.simulationReport = "";
     this.syncState = { files: {}, lastSyncedAt: 0 };
     this.settings.lastSyncStartedAt = null;
     this.settings.lastSyncCompletedAt = null;
@@ -240,6 +244,7 @@ export default class VaultboxPlugin extends Plugin {
   }
 
   async syncNow(): Promise<void> {
+    this.simulationReport = "";
     const hadExistingSyncState = Object.keys(this.syncState.files).length > 0;
     let progressNotice: Notice | null = null;
 
@@ -330,25 +335,42 @@ export default class VaultboxPlugin extends Plugin {
   }
 
   async simulateSync(): Promise<void> {
+    this.simulationReport = "";
     try {
       this.debugLog.write("simulation.start", {
         version: this.manifest.version,
         folderPath: this.settings.selectedFolderPath,
       });
       const plan = await this.buildSyncPlan();
+      const report = formatCompleteSyncReport(plan, {
+        version: this.manifest.version,
+        folderPath: this.settings.selectedFolderPath,
+        createdAt: new Date().toISOString(),
+      });
       this.writeMutationPathDiagnostics("simulation.plan-paths", plan);
       const message = formatSyncPlan(plan);
       this.settings.lastSyncCompletedAt = Date.now();
       this.settings.lastSyncSummary = message;
       this.debugLog.write("simulation.complete", plan.summary);
       await this.saveSettings();
-      new Notice("Simulation complete.");
+      this.simulationReport = report;
+      this.showSimulationReport();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.settings.lastSyncSummary = `Simulation failed: ${message}`;
       this.debugLog.write("simulation.failed", { message });
       await this.saveSettings();
       new Notice(this.settings.lastSyncSummary);
+    }
+  }
+
+  hasSimulationReport(): boolean {
+    return this.simulationReport.length > 0;
+  }
+
+  showSimulationReport(): void {
+    if (this.simulationReport) {
+      new SyncReportModal(this.app, this.simulationReport).open();
     }
   }
 

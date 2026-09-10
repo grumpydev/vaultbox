@@ -335,7 +335,7 @@ export function formatSyncPlan(plan: SyncPlan, heading = "Simulation"): string {
     lines.push(`- Conflict: ${conflict.message}`);
   }
 
-  const remaining = visible.length + plan.conflicts.length - 24;
+  const remaining = Math.max(0, visible.length - 12) + Math.max(0, plan.conflicts.length - 12);
   if (remaining > 0) {
     lines.push(`- ${remaining} more planned changes not shown.`);
   }

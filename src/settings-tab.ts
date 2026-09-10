@@ -186,7 +186,13 @@ export class VaultboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Last sync")
-      .setDesc(this.plugin.settings.lastSyncSummary || "No completed sync yet.");
+      .setDesc(this.plugin.settings.lastSyncSummary || "No completed sync yet.")
+      .addButton((button) => {
+        button
+          .setButtonText("View simulation report")
+          .setDisabled(!this.plugin.hasSimulationReport())
+          .onClick(() => this.plugin.showSimulationReport());
+      });
 
     new Setting(containerEl)
       .setName("Reset sync tracking")
