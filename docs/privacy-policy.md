@@ -1,6 +1,6 @@
 # Vaultbox Privacy Policy
 
-Last updated: 2026-06-21
+Last updated: 2026-11-04
 
 Vaultbox is an Obsidian plugin that syncs an Obsidian vault directly with a Dropbox folder selected by the user. Vaultbox runs inside Obsidian on the user's device. It does not use a separate Vaultbox server.
 
@@ -46,7 +46,7 @@ Debug logs are intended for troubleshooting. Vaultbox redacts token-like fields 
 
 Vaultbox reads local Obsidian files so it can compare them with Dropbox and sync changes. Vaultbox may upload, download, modify, or delete files as part of the sync plan shown or executed by the user.
 
-Vaultbox excludes Obsidian's configuration folder and hidden directories from sync by default. Users may explicitly enable synchronization of the community plugin ID list, themes, CSS snippets, or selected top-level hidden directories.
+Vaultbox excludes Obsidian's configuration folder and hidden directories from sync by default. Users may explicitly enable synchronization of the community plugin ID list, themes, CSS snippets, bookmarks, or selected top-level hidden directories. When bookmark sync is enabled, the whole `bookmarks.json` file is included; this may contain bookmarked paths, titles, and search queries.
 
 Configuration synchronization uses a narrow allowlist. Vaultbox does not sync community plugin binaries, plugin `data.json` files, workspace state, or Vaultbox's locally stored Dropbox tokens.
 

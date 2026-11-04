@@ -10,6 +10,7 @@ export interface VaultboxSettings {
   syncCommunityPlugins: boolean;
   syncThemes: boolean;
   syncSnippets: boolean;
+  syncBookmarks: boolean;
   syncExtraHiddenDirs: string[];
   syncExcludePaths: string[];
   localChangeIndicatorEnabled: boolean;
@@ -33,6 +34,7 @@ export const DEFAULT_SETTINGS: VaultboxSettings = {
   syncCommunityPlugins: false,
   syncThemes: false,
   syncSnippets: false,
+  syncBookmarks: false,
   syncExtraHiddenDirs: [],
   syncExcludePaths: [],
   localChangeIndicatorEnabled: true,

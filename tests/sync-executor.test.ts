@@ -4,19 +4,19 @@ import {
   SyncExecutionError,
   type SyncDropboxClient,
 } from "../src/sync-executor";
-import { getDropboxContentHash, normalizePathKey, type SyncPlan } from "../src/sync-plan";
-import { createSyncPathPolicy } from "../src/sync-policy";
+import { createRemoteFileSnapshot, createSyncPlan, getDropboxContentHash, normalizePathKey, scanLocalVault, type SyncPlan } from "../src/sync-plan";
+import { createSyncPathPolicy, filterSyncState } from "../src/sync-policy";
 import { DEFAULT_SETTINGS, type DropboxFileMetadata, type SyncedFileState, type VaultboxSettings, type VaultboxSyncState } from "../src/types";
 
 type ExecuteSyncPlanArgs = Parameters<typeof executeSyncPlanRaw>[0];
 
 function executeSyncPlan(
-  args: Omit<ExecuteSyncPlanArgs, "fileManager" | "pathPolicy"> & { settings?: VaultboxSettings },
+  args: Omit<ExecuteSyncPlanArgs, "fileManager" | "pathPolicy"> & { settings?: VaultboxSettings; configDir?: string },
 ): ReturnType<typeof executeSyncPlanRaw> {
-  const { settings = DEFAULT_SETTINGS, ...executionArgs } = args;
+  const { settings = DEFAULT_SETTINGS, configDir = ".obsidian", ...executionArgs } = args;
   return executeSyncPlanRaw({
     ...executionArgs,
-    pathPolicy: createSyncPathPolicy(settings, ".obsidian"),
+    pathPolicy: createSyncPathPolicy(settings, configDir),
     fileManager: {
       trashFile: async (file: { path: string }) => {
         await (executionArgs.vault as { delete(file: { path: string }): Promise<void> }).delete(file);
@@ -611,6 +611,152 @@ describe("sync executor", () => {
   });
 });
 
+describe.each([".obsidian", ".custom-obsidian"])("bookmark sync in %s", (configDir) => {
+  const path = `${configDir}/bookmarks.json`;
+  const settings = { ...DEFAULT_SETTINGS, syncBookmarks: true };
+  const original = JSON.stringify({ items: [{ type: "file", path: "Notes/A.md", title: "Original" }] });
+  const edited = JSON.stringify({ items: [{ type: "file", path: "Notes/B.md", title: "Updated" }] });
+
+  async function buildPlan(vault: FakeVault, remote: DropboxFileMetadata[], tracking = emptyState(), enabled = true) {
+    const policy = createSyncPathPolicy({ ...settings, syncBookmarks: enabled }, configDir);
+    return createSyncPlan({
+      localFiles: await scanLocalVault(vault.asVault(), policy),
+      remoteFiles: createRemoteFileSnapshot(new Map(remote.map((file) => [file.pathLower, file])), "/Vault", policy),
+      state: filterSyncState(tracking, policy),
+    });
+  }
+
+  it("uploads bookmarks, downloads a later edit, then settles to a noop", async () => {
+    const vault = new FakeVault({ [path]: original, [`${configDir}/workspace.json`]: "private layout" });
+    const firstRemote = remoteFile(`/Vault/${path}`, await hash(original), "rev-first");
+    const dropbox = new FakeDropbox({ uploadResult: firstRemote, downloadContent: bytes(edited) });
+    const uploadPlan = await buildPlan(vault, []);
+    expect(uploadPlan.operations.map((op) => [op.kind, op.path])).toEqual([["upload", path]]);
+    const first = await executeSyncPlan({
+      vault: vault.asVault(), dropbox, rootPath: "/Vault", settings, configDir,
+      currentState: emptyState(), plan: uploadPlan,
+    });
+    expect(dropbox.upload).toHaveBeenCalledWith({ path: `/Vault/${path}`, content: bytes(original), rev: undefined });
+
+    const secondRemote = remoteFile(`/Vault/${path}`, await hash(edited), "rev-second");
+    const downloadPlan = await buildPlan(vault, [secondRemote], first.state);
+    expect(downloadPlan.operations.map((op) => op.kind)).toEqual(["download"]);
+    const second = await executeSyncPlan({
+      vault: vault.asVault(), dropbox, rootPath: "/Vault", settings, configDir,
+      currentState: first.state, plan: downloadPlan,
+    });
+    expect(vault.text(path)).toBe(edited);
+    expect(vault.text(`${configDir}/workspace.json`)).toBe("private layout");
+    const settled = await buildPlan(vault, [secondRemote], second.state);
+    expect(settled.operations.map((op) => op.kind)).toEqual(["noop"]);
+    expect(settled.conflicts).toEqual([]);
+  });
+
+  it("downloads bookmarks when the local file and configuration directory do not exist", async () => {
+    const vault = new FakeVault({});
+    const remote = remoteFile(`/Vault/${path}`, await hash(original), "rev-first");
+    const dropbox = new FakeDropbox({ downloadContent: bytes(original) });
+    const result = await executeSyncPlan({
+      vault: vault.asVault(), dropbox, rootPath: "/Vault", settings, configDir,
+      currentState: emptyState(), plan: await buildPlan(vault, [remote]),
+    });
+    expect(result.applied).toBe(1);
+    expect(vault.text(path)).toBe(original);
+    expect(vault.hasFolder(configDir)).toBe(true);
+  });
+
+  it.each([false, true])("blocks divergent bookmarks without writes (previously synced: %s)", async (hasTracking) => {
+    const baseline = await hash("old bookmarks");
+    const tracking = hasTracking ? state([synced(path, baseline, baseline, "rev-old")]) : emptyState();
+    const vault = new FakeVault({ [path]: original });
+    const remote = remoteFile(`/Vault/${path}`, await hash(edited), "rev-new");
+    const dropbox = new FakeDropbox({});
+    const conflictPlan = await buildPlan(vault, [remote], tracking);
+    expect(conflictPlan.conflicts.map((conflict) => conflict.type)).toEqual([hasTracking ? "both-modified" : "both-new"]);
+    await expect(executeSyncPlan({
+      vault: vault.asVault(), dropbox, rootPath: "/Vault", settings, configDir,
+      currentState: tracking, plan: conflictPlan,
+    })).rejects.toThrow(/Cannot sync while/);
+    expect(vault.text(path)).toBe(original);
+    expect(dropbox.upload).not.toHaveBeenCalled();
+    expect(dropbox.download).not.toHaveBeenCalled();
+    expect(dropbox.delete).not.toHaveBeenCalled();
+  });
+
+  it.each(["local", "remote"])("does not propagate %s deletion while disabled, and re-enables as a fresh sync", async (deletedSide) => {
+    const contentHash = await hash(original);
+    const tracking = state([synced(path, contentHash, contentHash, "rev-old")]);
+    const vault = new FakeVault(deletedSide === "local" ? {} : { [path]: original });
+    const remote = deletedSide === "remote" ? [] : [remoteFile(`/Vault/${path}`, contentHash, "rev-old")];
+    const disabled = createSyncPathPolicy(DEFAULT_SETTINGS, configDir);
+    const filtered = filterSyncState(tracking, disabled);
+    expect(filtered.files).toEqual({});
+    const disabledPlan = await buildPlan(vault, remote, tracking, false);
+    expect(disabledPlan.operations).toEqual([]);
+    expect(disabledPlan.conflicts).toEqual([]);
+    const fresh = await buildPlan(vault, remote, filtered);
+    expect(fresh.operations.map((op) => op.kind)).toEqual([deletedSide === "local" ? "download" : "upload"]);
+    expect(tracking.files[path]).toBeDefined();
+  });
+
+  it("does not overwrite different copies on re-enable", async () => {
+    const previousHash = await hash(original);
+    const tracking = filterSyncState(state([synced(path, previousHash, previousHash, "rev-old")]), createSyncPathPolicy(DEFAULT_SETTINGS, configDir));
+    const fresh = await buildPlan(new FakeVault({ [path]: original }), [remoteFile(`/Vault/${path}`, await hash(edited), "rev-new")], tracking);
+    expect(fresh.conflicts.map((conflict) => conflict.type)).toEqual(["both-new"]);
+  });
+
+  it.each(["local", "remote"])("propagates an intentional %s deletion while enabled", async (deletedSide) => {
+    const contentHash = await hash(original);
+    const previous = synced(path, contentHash, contentHash, "rev-old");
+    const tracking = state([previous]);
+    const vault = new FakeVault(deletedSide === "local" ? {} : { [path]: original });
+    const remote = remoteFile(`/Vault/${path}`, contentHash, "rev-old");
+    const dropbox = new FakeDropbox(deletedSide === "local" ? { metadata: remote } : {
+      metadataError: new Error("Dropbox /files/get_metadata failed with 409: path/not_found/"),
+    });
+    const deletePlan = await buildPlan(vault, deletedSide === "local" ? [remote] : [], tracking);
+    expect(deletePlan.operations.map((op) => op.kind)).toEqual([deletedSide === "local" ? "delete-remote" : "delete-local"]);
+    const result = await executeSyncPlan({
+      vault: vault.asVault(), dropbox, rootPath: "/Vault", settings, configDir,
+      currentState: tracking, plan: deletePlan,
+    });
+    expect(result.state.files[path]).toBeUndefined();
+    expect(vault.hasFile(path)).toBe(false);
+    if (deletedSide === "local") {
+      expect(dropbox.delete).toHaveBeenCalledWith(`/Vault/${path}`);
+    } else {
+      expect(dropbox.delete).not.toHaveBeenCalled();
+    }
+  });
+
+  it("refuses to overwrite bookmarks edited locally after planning", async () => {
+    const baseline = await hash(original);
+    const tracking = state([synced(path, baseline, baseline, "rev-old")]);
+    const remote = remoteFile(`/Vault/${path}`, await hash(edited), "rev-new");
+    const pending = await buildPlan(new FakeVault({ [path]: original }), [remote], tracking);
+    const changed = new FakeVault({ [path]: "new local bookmarks" });
+    const dropbox = new FakeDropbox({ downloadContent: bytes(edited) });
+    await expect(executeSyncPlan({
+      vault: changed.asVault(), dropbox, rootPath: "/Vault", settings, configDir,
+      currentState: tracking, plan: pending,
+    })).rejects.toThrow(/Local file changed before download/);
+    expect(changed.text(path)).toBe("new local bookmarks");
+    expect(dropbox.download).not.toHaveBeenCalled();
+  });
+
+  it("rejects a pending bookmark transfer if the option was disabled after planning", async () => {
+    const vault = new FakeVault({ [path]: original });
+    const dropbox = new FakeDropbox({});
+    const pending = await buildPlan(vault, []);
+    await expect(executeSyncPlan({
+      vault: vault.asVault(), dropbox, rootPath: "/Vault", configDir,
+      currentState: emptyState(), plan: pending,
+    })).rejects.toThrow(/Refusing to sync excluded or unsafe path/);
+    expect(dropbox.upload).not.toHaveBeenCalled();
+  });
+});
+
 class FakeDropbox implements SyncDropboxClient {
   activeUploads = 0;
   maxUploadInFlight = 0;
@@ -662,6 +808,7 @@ class FakeVault {
 
   asVault() {
     return {
+      getFiles: () => [...this.files.keys()].filter((path) => !path.startsWith(".")).map((path) => this.file(path)),
       getFileByPath: (path: string) => this.hasFile(path) ? this.file(path) : null,
       getFolderByPath: (path: string) => this.folders.has(path) ? { path } : null,
       createFolder: async (path: string) => {

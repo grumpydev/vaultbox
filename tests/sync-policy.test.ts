@@ -50,6 +50,41 @@ describe("sync path policy", () => {
     expect(shouldSyncPath(".other/file.md", policy)).toBe(false);
   });
 
+  it.each([".obsidian", ".custom-obsidian", "Config"])("opts in to bookmarks independently under %s", (configDir) => {
+    const path = `${configDir}/bookmarks.json`;
+    const disabled = createSyncPathPolicy(settings({
+      syncCommunityPlugins: true,
+      syncThemes: true,
+      syncSnippets: true,
+    }), configDir);
+    const enabled = createSyncPathPolicy(settings({ syncBookmarks: true }), configDir);
+
+    expect(DEFAULT_SETTINGS.syncBookmarks).toBe(false);
+    expect(shouldSyncPath(path, disabled)).toBe(false);
+    expect(enabled.allowedConfigPaths).toEqual([path]);
+    expect(shouldSyncPath(path, enabled)).toBe(true);
+    expect(isAdapterPath(path, enabled)).toBe(true);
+    for (const excluded of [
+      "workspace.json", "workspace-mobile.json", "app.json", "community-plugins.json",
+      "plugins/vaultbox/data.json", "plugins/example/main.js", "bookmarks.json.bak",
+      "themes/example/theme.css", "snippets/example.css",
+    ]) {
+      expect(shouldSyncPath(`${configDir}/${excluded}`, enabled)).toBe(false);
+    }
+    if (configDir !== ".obsidian") {
+      expect(shouldSyncPath(".obsidian/bookmarks.json", enabled)).toBe(false);
+    }
+  });
+
+  it.each(["bookmarks.json", ".custom-obsidian/bookmarks.json"])("lets %s exclude enabled bookmarks", (exclude) => {
+    const policy = createSyncPathPolicy(settings({
+      syncBookmarks: true,
+      syncExcludePaths: [exclude],
+    }), ".custom-obsidian");
+    expect(shouldSyncPath(".custom-obsidian/bookmarks.json", policy)).toBe(false);
+    expect(isAdapterPath(".custom-obsidian/bookmarks.json", policy)).toBe(false);
+  });
+
   it("sanitizes hidden directory names and exclusion patterns", () => {
     const configured = settings({
       syncExtraHiddenDirs: [".claude", ".CLAUDE", "..", ".git", ".obsidian", ".a/b", "visible"],

@@ -304,6 +304,18 @@ export class VaultboxSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName("Bookmarks")
+      .setDesc(`Sync ${configDir}/bookmarks.json. Workspace layouts remain excluded.`)
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.syncBookmarks)
+          .onChange(async (value) => {
+            this.plugin.settings.syncBookmarks = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
       .setName("Extra hidden directories")
       .setDesc("Enter one top-level hidden directory per line. Reserved and nested paths are ignored.")
       .addTextArea((textArea) => {

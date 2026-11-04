@@ -35,6 +35,9 @@ export function getConfigAllowedPaths(settings: VaultboxSettings, configDir: str
   if (settings.syncSnippets) {
     paths.push(`${configDir}/snippets`);
   }
+  if (settings.syncBookmarks) {
+    paths.push(`${configDir}/bookmarks.json`);
+  }
 
   return paths;
 }

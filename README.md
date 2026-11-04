@@ -15,7 +15,7 @@ It is built for people who already keep a vault in Dropbox on a desktop machine,
 - Pick an existing Dropbox folder, so desktop users can keep using their current Dropbox workflow.
 - Preview changes with simulation before applying them.
 - Choose manual sync for full control or automatic sync for routine updates.
-- Keep Obsidian configuration and hidden directories out of sync by default, with narrow opt-in categories for plugin IDs, themes, snippets, and selected hidden directories.
+- Keep Obsidian configuration and hidden directories out of sync by default, with narrow opt-in categories for plugin IDs, themes, snippets, bookmarks, and selected hidden directories.
 - Detect conflicts and stop for a user decision instead of silently overwriting notes.
 
 Vaultbox is deliberately conservative. It plans the sync before applying it, tracks file metadata, treats deletes carefully, rechecks files before changing them, and uses Dropbox `rev` values for guarded remote writes.
@@ -36,6 +36,16 @@ The settings screen also includes **Simulate sync**. Simulation builds the same 
 
 Simulation opens a complete, read-only report, grouped into local deletes, remote deletes, uploads, downloads, no-ops, and conflicts. No paths are truncated. Use the copy icon to copy the report, or **Select all** and your device's copy action if clipboard access is unavailable. **View simulation report** beside **Last sync** reopens the snapshot during the current plugin session. A new simulation, a sync attempt, or resetting tracking clears the previous report. The report includes the scan time, plugin version, and Dropbox folder; it is not a live preview, so simulate again after making changes. Reports contain filenames and folder paths: review them for private information before sharing. They do not include file contents or authentication credentials.
 
+### Optional Bookmark Sync
+
+Enable **Bookmarks** under **Configuration sync** on each device using Vaultbox where you want bookmark sync. It is off by default, including for existing installations. Vaultbox syncs only `bookmarks.json` in the vault's configured Obsidian configuration directory; desktop and mobile workspace layouts remain excluded.
+
+Bookmarks sync as a whole file, not a merged list. Different bookmark files on the first sync, or changes on both devices since the last sync, produce a conflict and stop the sync rather than silently combining or overwriting them. Back up both versions before choosing which to keep, and run **Simulate sync** before the first sync.
+
+Turning the option off leaves local and Dropbox bookmark files in place and removes their sync tracking. Re-enabling compares the current files as a fresh sync. Hidden-path exclusions still take precedence. Devices must use the same configuration-directory path to share this file.
+
+After receiving bookmarks, check the Bookmarks pane before making further changes. If it still shows the previous list, restart Obsidian. Vaultbox does not use private core-plugin APIs to force a reload.
+
 ## First Sync Performance
 
 Initial push syncs to an empty Dropbox folder can take a few minutes for larger vaults. Vaultbox intentionally favors consistency over raw throughput: it plans first, rechecks each local file before upload, uses guarded Dropbox writes, handles Dropbox write throttling with backoff, and only records files as synced after Dropbox confirms them.
@@ -54,7 +64,7 @@ That testing does not remove the need for backups, especially while the plugin i
 
 ## Privacy And Access
 
-Vaultbox enumerates vault files so it can compare local paths with the selected Dropbox folder and decide what needs to sync. Obsidian's configuration directory and hidden directories are excluded by default. Users can separately enable synchronization of `community-plugins.json`, themes, snippets, or explicitly selected top-level hidden directories.
+Vaultbox enumerates vault files so it can compare local paths with the selected Dropbox folder and decide what needs to sync. Obsidian's configuration directory and hidden directories are excluded by default. Users can separately enable synchronization of `community-plugins.json`, themes, snippets, `bookmarks.json`, or explicitly selected top-level hidden directories.
 
 The configuration allowlist is deliberately narrow. Vaultbox never syncs community plugin binaries, plugin `data.json` files, workspace state, or Vaultbox's stored Dropbox tokens. Optional exclusion patterns can remove particular paths or filenames from the enabled configuration and hidden directories.
 
@@ -126,6 +136,15 @@ Run unit tests:
 ```bash
 npm test
 ```
+
+Run the desktop bookmark smoke test (close Obsidian first):
+
+```bash
+npm run build
+node e2e/bookmarks-smoke.mjs
+```
+
+This launches the installed Obsidian app with a disposable vault and profile. It uses an in-memory Dropbox transport, not your account, and checks the opt-in toggle, upload/download, live Bookmarks pane refresh, restart persistence, and disabling without deleting bookmarks. Screenshots remain under `tmp/bookmarks-smoke-*`. Physical mobile and live Dropbox API testing are separate checks.
 
 Run Dropbox API E2E tests:
 

@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright-core";
 
@@ -314,7 +315,16 @@ async function getFreePort() {
   return address.port;
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+export {
+  assertNoExistingObsidianProcess, prepareVault, prepareObsidianUserData,
+  getFreePort, launchObsidian, connectToObsidian, getObsidianPage,
+  waitForExpectedVault, disableRestrictedMode, enableVaultboxPlugin,
+  trustVaultIfPrompted, waitForPlugin, openVaultboxSettings,
+};
+
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
