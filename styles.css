@@ -126,3 +126,39 @@
 .vaultbox-report-modal .setting-item-control {
   flex-wrap: wrap;
 }
+
+.vaultbox-conflict-modal {
+  width: 760px;
+  max-width: 95vw;
+}
+
+.vaultbox-conflict-list {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  max-height: 50vh;
+  overflow: auto;
+  padding: 0 10px;
+}
+
+.vaultbox-conflict-row .setting-item-name {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  overflow-wrap: anywhere;
+}
+
+.vaultbox-conflict-row .setting-item-description {
+  font-size: var(--font-ui-smaller);
+}
+
+@media (max-width: 600px) {
+  .vaultbox-conflict-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .vaultbox-conflict-row .setting-item-control {
+    justify-content: flex-start;
+    width: 100%;
+  }
+}

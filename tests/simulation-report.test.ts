@@ -18,7 +18,7 @@ describe("simulation report lifecycle", () => {
   beforeEach(() => { reports.length = 0; vi.clearAllMocks(); });
 
   function plugin() {
-    const plugin = new VaultboxPlugin({} as never, {} as never);
+    const plugin = new VaultboxPlugin({ vault: { configDir: ".obsidian" } } as never, {} as never);
     Object.assign(plugin, { manifest: { version: "1.0.10" }, debugLog: { write: vi.fn() } });
     vi.spyOn(plugin, "saveSettings").mockResolvedValue();
     vi.spyOn(plugin, "buildSyncPlan").mockResolvedValue(createSyncPlan({ localFiles: new Map(), remoteFiles: new Map() }));

@@ -4,6 +4,10 @@ export class Notice {
   constructor(message: string) {
     Notice.messages.push(message);
   }
+
+  setMessage(_message: string): void {}
+
+  hide(): void {}
 }
 
 type RequestUrl = (request: {
@@ -34,7 +38,23 @@ export async function requestUrl(request: Parameters<RequestUrl>[0]): Promise<Aw
   return requestUrlMock(request);
 }
 
-export class Plugin {}
+export class Modal {
+  constructor(readonly app?: unknown) {}
+  open(): void {}
+  close(): void {}
+}
+
+export class DropdownComponent {}
+
+export class Plugin {
+  app: unknown;
+  manifest: unknown;
+
+  constructor(app?: unknown, manifest?: unknown) {
+    this.app = app;
+    this.manifest = manifest;
+  }
+}
 export class PluginSettingTab {}
 export class Setting {}
 export class App {}

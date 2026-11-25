@@ -1,3 +1,5 @@
+export type ConflictResolutionMode = "newest-wins" | "keep-both" | "ask";
+
 export interface VaultboxSettings {
   accessToken: string;
   accessTokenExpiresAt: number;
@@ -13,6 +15,10 @@ export interface VaultboxSettings {
   syncBookmarks: boolean;
   syncExtraHiddenDirs: string[];
   syncExcludePaths: string[];
+  conflictResolutionMode: ConflictResolutionMode;
+  conflictPrompt: boolean;
+  conflictAmbiguityWindowSeconds: number;
+  conflictKeepOverwrittenLocal: boolean;
   localChangeIndicatorEnabled: boolean;
   remoteChangeIndicatorEnabled: boolean;
   remoteChangeCheckIntervalMinutes: number;
@@ -37,6 +43,10 @@ export const DEFAULT_SETTINGS: VaultboxSettings = {
   syncBookmarks: false,
   syncExtraHiddenDirs: [],
   syncExcludePaths: [],
+  conflictResolutionMode: "newest-wins",
+  conflictPrompt: true,
+  conflictAmbiguityWindowSeconds: 60,
+  conflictKeepOverwrittenLocal: true,
   localChangeIndicatorEnabled: true,
   remoteChangeIndicatorEnabled: false,
   remoteChangeCheckIntervalMinutes: 15,

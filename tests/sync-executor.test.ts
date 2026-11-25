@@ -447,7 +447,7 @@ describe("sync executor", () => {
     expect(result.state.files["a.md"]).toBeUndefined();
   });
 
-  it("refuses to execute plans that still have conflicts", async () => {
+  it("refuses to execute plans that still have blocking conflicts", async () => {
     await expect(
       executeSyncPlan({
         vault: new FakeVault({}).asVault(),
@@ -459,7 +459,7 @@ describe("sync executor", () => {
           conflicts: [
             {
               kind: "conflict",
-              type: "both-modified",
+              type: "path-shape-conflict",
               path: "a.md",
               message: "conflict",
             },
@@ -474,7 +474,49 @@ describe("sync executor", () => {
           },
         },
       }),
-    ).rejects.toThrow(/Cannot sync/);
+    ).rejects.toThrow(/blocking conflict/);
+  });
+
+  it("applies the rest of the plan while a per-file conflict stays unresolved", async () => {
+    const contentHash = await hash("other");
+    const vault = new FakeVault({ "other.md": "other" });
+    const dropbox = new FakeDropbox({});
+
+    const result = await executeSyncPlan({
+      vault: vault.asVault(),
+      dropbox,
+      rootPath: "/Vault",
+      currentState: emptyState(),
+      plan: {
+        operations: [
+          {
+            kind: "upload",
+            path: "other.md",
+            local: localFile("other.md", contentHash),
+          },
+        ],
+        conflicts: [
+          {
+            kind: "conflict",
+            type: "both-modified",
+            path: "a.md",
+            message: "conflict",
+          },
+        ],
+        summary: {
+          uploads: 1,
+          downloads: 0,
+          remoteDeletes: 0,
+          localDeletes: 0,
+          noops: 0,
+          conflicts: 1,
+        },
+      },
+    });
+
+    expect(result.applied).toBe(1);
+    expect(dropbox.upload).toHaveBeenCalledTimes(1);
+    expect(result.state.files["a.md"]).toBeUndefined();
   });
 
   it("refuses multiple changes targeting Unicode-equivalent paths", async () => {
@@ -665,7 +707,7 @@ describe.each([".obsidian", ".custom-obsidian"])("bookmark sync in %s", (configD
     expect(vault.hasFolder(configDir)).toBe(true);
   });
 
-  it.each([false, true])("blocks divergent bookmarks without writes (previously synced: %s)", async (hasTracking) => {
+  it.each([false, true])("leaves divergent bookmarks untouched while unresolved (previously synced: %s)", async (hasTracking) => {
     const baseline = await hash("old bookmarks");
     const tracking = hasTracking ? state([synced(path, baseline, baseline, "rev-old")]) : emptyState();
     const vault = new FakeVault({ [path]: original });
@@ -673,10 +715,11 @@ describe.each([".obsidian", ".custom-obsidian"])("bookmark sync in %s", (configD
     const dropbox = new FakeDropbox({});
     const conflictPlan = await buildPlan(vault, [remote], tracking);
     expect(conflictPlan.conflicts.map((conflict) => conflict.type)).toEqual([hasTracking ? "both-modified" : "both-new"]);
-    await expect(executeSyncPlan({
+    const result = await executeSyncPlan({
       vault: vault.asVault(), dropbox, rootPath: "/Vault", settings, configDir,
       currentState: tracking, plan: conflictPlan,
-    })).rejects.toThrow(/Cannot sync while/);
+    });
+    expect(result.applied).toBe(0);
     expect(vault.text(path)).toBe(original);
     expect(dropbox.upload).not.toHaveBeenCalled();
     expect(dropbox.download).not.toHaveBeenCalled();
@@ -795,6 +838,7 @@ class FakeDropbox implements SyncDropboxClient {
 }
 
 class FakeVault {
+  readonly deleted: string[] = [];
   private readonly files = new Map<string, ArrayBuffer>();
   private readonly folders = new Set<string>();
   failNextModifyBinary: Error | null = null;
@@ -837,6 +881,7 @@ class FakeVault {
         return this.file(path);
       },
       delete: async (file: { path: string }) => {
+        this.deleted.push(file.path);
         this.files.delete(file.path);
       },
       adapter: {
@@ -985,3 +1030,157 @@ function bytes(value: string): ArrayBuffer {
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+describe("conflict resolution execution", () => {
+  it("replaces the Dropbox file when the local version wins", async () => {
+    const content = "local wins";
+    const contentHash = await hash(content);
+    const vault = new FakeVault({ "Notes/A.md": content });
+    const dropbox = new FakeDropbox({ uploadResult: remoteFile("/Vault/Notes/A.md", contentHash, "rev-new") });
+    const previous = synced("Notes/A.md", await hash("base"), await hash("base"), "rev-base");
+
+    const result = await executeSyncPlan({
+      vault: vault.asVault(),
+      dropbox,
+      rootPath: "/Vault",
+      currentState: state([previous]),
+      plan: plan([{
+        kind: "upload",
+        path: "Notes/A.md",
+        local: localFile("Notes/A.md", contentHash),
+        previous,
+        overwriteRemote: true,
+      }]),
+    });
+
+    // The stored rev is stale after a conflict, so the guarded update mode cannot be used.
+    expect(dropbox.upload).toHaveBeenCalledWith(expect.objectContaining({ overwrite: true, rev: undefined }));
+    expect(result.state.files["notes/a.md"]).toMatchObject({ remoteRev: "rev-new" });
+  });
+
+  it("overwrites a locally changed file when the Dropbox version wins, keeping the old one in the trash", async () => {
+    const incoming = "dropbox wins";
+    const incomingHash = await hash(incoming);
+    const vault = new FakeVault({ "Notes/A.md": "local edit" });
+    const dropbox = new FakeDropbox({ downloadContent: bytes(incoming) });
+    const previous = synced("Notes/A.md", await hash("base"), await hash("base"), "rev-base");
+
+    const result = await executeSyncPlan({
+      vault: vault.asVault(),
+      dropbox,
+      rootPath: "/Vault",
+      currentState: state([previous]),
+      plan: plan([{
+        kind: "download",
+        path: "Notes/A.md",
+        remote: remoteFile("/Vault/Notes/A.md", incomingHash, "rev-new"),
+        previous,
+        overwriteLocal: true,
+        trashExistingLocal: true,
+      }]),
+    });
+
+    expect(vault.text("Notes/A.md")).toBe(incoming);
+    expect(vault.deleted).toEqual(["Notes/A.md"]);
+    expect(result.state.files["notes/a.md"]).toMatchObject({ localContentHash: incomingHash, remoteRev: "rev-new" });
+  });
+
+  it("writes a conflict copy beside the local file and leaves it untracked", async () => {
+    const incoming = "dropbox version";
+    const incomingHash = await hash(incoming);
+    const localHash = await hash("local version");
+    const copyPath = "Notes/A (Dropbox conflict 2026-01-01 12-00).md";
+    const vault = new FakeVault({ "Notes/A.md": "local version" });
+    const dropbox = new FakeDropbox({
+      downloadContent: bytes(incoming),
+      uploadResult: remoteFile("/Vault/Notes/A.md", localHash, "rev-new"),
+    });
+
+    const result = await executeSyncPlan({
+      vault: vault.asVault(),
+      dropbox,
+      rootPath: "/Vault",
+      currentState: emptyState(),
+      plan: plan([
+        {
+          kind: "download",
+          path: "Notes/A.md",
+          remote: remoteFile("/Vault/Notes/A.md", incomingHash, "rev-remote"),
+          targetPath: copyPath,
+        },
+        {
+          kind: "upload",
+          path: "Notes/A.md",
+          local: localFile("Notes/A.md", localHash),
+          overwriteRemote: true,
+        },
+      ]),
+    });
+
+    expect(vault.text(copyPath)).toBe(incoming);
+    expect(vault.text("Notes/A.md")).toBe("local version");
+    expect(dropbox.download).toHaveBeenCalledWith("/Vault/Notes/A.md");
+    // Tracking the copy would make the next plan treat it as deleted on Dropbox.
+    expect(result.state.files[normalizePathKey(copyPath)]).toBeUndefined();
+    expect(result.state.files["notes/a.md"]).toMatchObject({ remoteRev: "rev-new" });
+  });
+
+  it("deletes from Dropbox after an explicit decision even though the rev moved on", async () => {
+    const previous = synced("Notes/A.md", await hash("base"), await hash("base"), "rev-base");
+    const dropbox = new FakeDropbox({ metadata: remoteFile("/Vault/Notes/A.md", await hash("newer"), "rev-moved-on") });
+
+    const result = await executeSyncPlan({
+      vault: new FakeVault({}).asVault(),
+      dropbox,
+      rootPath: "/Vault",
+      currentState: state([previous]),
+      plan: plan([{
+        kind: "delete-remote",
+        path: "Notes/A.md",
+        remote: remoteFile("/Vault/Notes/A.md", await hash("newer"), "rev-moved-on"),
+        previous,
+        force: true,
+      }]),
+    });
+
+    expect(dropbox.delete).toHaveBeenCalledWith("/Vault/Notes/A.md");
+    expect(result.state.files["notes/a.md"]).toBeUndefined();
+  });
+
+  it("still refuses an unforced delete when the Dropbox rev moved on", async () => {
+    const previous = synced("Notes/A.md", await hash("base"), await hash("base"), "rev-base");
+    const dropbox = new FakeDropbox({ metadata: remoteFile("/Vault/Notes/A.md", await hash("newer"), "rev-moved-on") });
+
+    await expect(executeSyncPlan({
+      vault: new FakeVault({}).asVault(),
+      dropbox,
+      rootPath: "/Vault",
+      currentState: state([previous]),
+      plan: plan([{
+        kind: "delete-remote",
+        path: "Notes/A.md",
+        remote: remoteFile("/Vault/Notes/A.md", await hash("newer"), "rev-moved-on"),
+        previous,
+      }]),
+    })).rejects.toThrow(/changed before delete/);
+    expect(dropbox.delete).not.toHaveBeenCalled();
+  });
+
+  it("accepts a Dropbox deletion of a locally edited file when that decision is forced", async () => {
+    const previous = synced("Notes/A.md", await hash("base"), await hash("base"), "rev-base");
+    const vault = new FakeVault({ "Notes/A.md": "local edit" });
+    const dropbox = new FakeDropbox({ metadataError: new Error("path/not_found") });
+
+    const result = await executeSyncPlan({
+      vault: vault.asVault(),
+      dropbox,
+      rootPath: "/Vault",
+      currentState: state([previous]),
+      plan: plan([{ kind: "delete-local", path: "Notes/A.md", previous, force: true }]),
+    });
+
+    expect(vault.hasFile("Notes/A.md")).toBe(false);
+    expect(vault.deleted).toEqual(["Notes/A.md"]);
+    expect(result.state.files["notes/a.md"]).toBeUndefined();
+  });
+});

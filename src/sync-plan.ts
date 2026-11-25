@@ -37,23 +37,38 @@ export type SyncOperation =
       path: string;
       local: LocalFileSnapshot;
       previous?: SyncedFileState;
+      /** Conflict resolution: replace the Dropbox file regardless of its current rev. */
+      overwriteRemote?: boolean;
     }
   | {
       kind: "download";
       path: string;
       remote: DropboxFileMetadata;
       previous?: SyncedFileState;
+      /** Conflict resolution: replace the local file even if it changed since the last sync. */
+      overwriteLocal?: boolean;
+      /**
+       * Conflict resolution: write the downloaded content here instead of `path`.
+       * The copy is deliberately left out of sync tracking so the next plan uploads it.
+       */
+      targetPath?: string;
+      /** Conflict resolution: move the replaced local file to the vault trash first. */
+      trashExistingLocal?: boolean;
     }
   | {
       kind: "delete-remote";
       path: string;
       remote: DropboxFileMetadata;
       previous: SyncedFileState;
+      /** Conflict resolution: delete even though the Dropbox rev moved on. */
+      force?: boolean;
     }
   | {
       kind: "delete-local";
       path: string;
       previous: SyncedFileState;
+      /** Conflict resolution: delete even though the local file changed since the last sync. */
+      force?: boolean;
     }
   | {
       kind: "noop";
@@ -72,6 +87,49 @@ export interface SyncConflict {
   remote?: DropboxFileMetadata;
   previous?: SyncedFileState;
   paths?: string[];
+}
+
+/**
+ * Conflicts a user can decide per file. Everything else is structural (case collisions,
+ * file-vs-folder paths, corrupt sync history) and must block the whole sync until the
+ * vault is repaired, because applying operations around it can lose data.
+ */
+export const RESOLVABLE_CONFLICT_TYPES: ReadonlySet<SyncConflictType> = new Set<SyncConflictType>([
+  "both-new",
+  "both-modified",
+  "local-edit-remote-delete",
+  "local-delete-remote-edit",
+]);
+
+export function isResolvableConflict(conflict: SyncConflict): boolean {
+  return RESOLVABLE_CONFLICT_TYPES.has(conflict.type);
+}
+
+export function splitConflicts(conflicts: SyncConflict[]): {
+  resolvable: SyncConflict[];
+  blocking: SyncConflict[];
+} {
+  const resolvable: SyncConflict[] = [];
+  const blocking: SyncConflict[] = [];
+
+  for (const conflict of conflicts) {
+    if (isResolvableConflict(conflict)) {
+      resolvable.push(conflict);
+    } else {
+      blocking.push(conflict);
+    }
+  }
+
+  return { resolvable, blocking };
+}
+
+/** Local path an operation writes to, which is not always `path` for conflict copies. */
+export function getOperationTargetPath(operation: SyncOperation): string {
+  if (operation.kind === "download" && operation.targetPath) {
+    return operation.targetPath;
+  }
+
+  return operation.path;
 }
 
 export interface SyncPlanSummary {
@@ -563,15 +621,15 @@ function findDuplicateOperationTargets(operations: SyncOperation[]): SyncConflic
       continue;
     }
 
-    const target = normalizePathSafetyKey(operation.path);
+    const target = normalizePathSafetyKey(getOperationTargetPath(operation));
     const existing = targets.get(target);
     if (existing && !conflicts.has(target)) {
       conflicts.set(target, {
         kind: "conflict",
         type: "duplicate-operation-target",
         path: target,
-        message: `Multiple sync changes target ${operation.path}. Sync has been blocked to protect this file.`,
-        paths: [existing.path, operation.path],
+        message: `Multiple sync changes target ${getOperationTargetPath(operation)}. Sync has been blocked to protect this file.`,
+        paths: [getOperationTargetPath(existing), getOperationTargetPath(operation)],
       });
     } else if (!existing) {
       targets.set(target, operation);
@@ -591,7 +649,7 @@ function normalizeDisplayPath(path: string): string {
   return path.replace(/\\/g, "/").replace(/^\/+/, "").normalize("NFC");
 }
 
-function summarizePlan(operations: SyncOperation[], conflicts: SyncConflict[]): SyncPlanSummary {
+export function summarizePlan(operations: SyncOperation[], conflicts: SyncConflict[]): SyncPlanSummary {
   return {
     uploads: operations.filter((operation) => operation.kind === "upload").length,
     downloads: operations.filter((operation) => operation.kind === "download").length,

@@ -1,4 +1,4 @@
-import type { SyncOperation, SyncPlan } from "./sync-plan";
+import { isResolvableConflict, splitConflicts, type SyncOperation, type SyncPlan } from "./sync-plan";
 
 const GROUPS: ReadonlyArray<readonly [SyncOperation["kind"], string]> = [
   ["delete-local", "Local deletes"],
@@ -11,6 +11,8 @@ const GROUPS: ReadonlyArray<readonly [SyncOperation["kind"], string]> = [
 export function formatCompleteSyncReport(
   plan: SyncPlan,
   context: { version: string; folderPath: string; createdAt: string },
+  /** What Vaultbox would do with each resolvable conflict, keyed by conflict path. */
+  proposals?: ReadonlyMap<string, string>,
 ): string {
   const lines = [
     "Simulation snapshot (not applied)",
@@ -30,9 +32,16 @@ export function formatCompleteSyncReport(
     }
   }
 
+  const { blocking } = splitConflicts(plan.conflicts);
   lines.push("", `Conflicts (${plan.conflicts.length})`);
+  if (blocking.length > 0) {
+    lines.push(`${blocking.length} of these block the whole sync until the vault is repaired.`);
+  }
   for (const conflict of plan.conflicts) {
-    lines.push(`- ${JSON.stringify(conflict.path)}: ${JSON.stringify(conflict.message)}`);
+    const outcome = isResolvableConflict(conflict)
+      ? proposals?.get(conflict.path) ?? "needs a decision"
+      : "blocks sync";
+    lines.push(`- ${JSON.stringify(conflict.path)}: ${JSON.stringify(conflict.message)} [${outcome}]`);
   }
 
   return lines.join("\n");

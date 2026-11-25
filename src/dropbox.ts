@@ -106,8 +106,13 @@ export class DropboxClient {
     path: string;
     content: ArrayBuffer;
     rev?: string;
+    overwrite?: boolean;
   }): Promise<DropboxFileMetadata> {
-    const mode = args.rev ? { ".tag": "update", update: args.rev } : { ".tag": "add" };
+    const mode = args.overwrite
+      ? { ".tag": "overwrite" }
+      : args.rev
+        ? { ".tag": "update", update: args.rev }
+        : { ".tag": "add" };
     const result = await this.content<unknown>(
       "/files/upload",
       {

@@ -9,7 +9,10 @@ import {
   normalizePathSafetyKey,
   scanLocalVault,
   shouldSyncPath,
+  splitConflicts,
   type LocalFileSnapshot,
+  type SyncConflict,
+  type SyncConflictType,
 } from "../src/sync-plan";
 import { createSyncPathPolicy, filterSyncState } from "../src/sync-policy";
 import { DEFAULT_SETTINGS, type DropboxFileMetadata, type SyncedFileState, type VaultboxSyncState } from "../src/types";
@@ -407,6 +410,68 @@ function localMap(...files: LocalFileSnapshot[]): Map<string, LocalFileSnapshot>
 
 function remoteMap(...files: DropboxFileMetadata[]): Map<string, DropboxFileMetadata> {
   return new Map(files.map((file) => [file.pathLower, file]));
+}
+
+describe("conflict classification", () => {
+  it("separates per-file conflicts from the structural ones that must block sync", () => {
+    const conflicts = [
+      conflictOfType("both-new"),
+      conflictOfType("both-modified"),
+      conflictOfType("local-edit-remote-delete"),
+      conflictOfType("local-delete-remote-edit"),
+      conflictOfType("local-case-conflict"),
+      conflictOfType("remote-case-conflict"),
+      conflictOfType("path-shape-conflict"),
+      conflictOfType("path-case-mismatch"),
+      conflictOfType("sync-state-path-conflict"),
+      conflictOfType("duplicate-operation-target"),
+    ];
+    const { resolvable, blocking } = splitConflicts(conflicts);
+
+    expect(resolvable.map((conflict) => conflict.type)).toEqual([
+      "both-new",
+      "both-modified",
+      "local-edit-remote-delete",
+      "local-delete-remote-edit",
+    ]);
+    expect(blocking).toHaveLength(6);
+  });
+
+  it("still plans the rest of the vault around a two-sided edit", () => {
+    const conflicted = localFile("Notes/Conflicted.md", "local-hash");
+    const uploadable = localFile("Notes/Fresh.md", "fresh-hash");
+    const plan = createSyncPlan({
+      localFiles: new Map([
+        [conflicted.pathLower, conflicted],
+        [uploadable.pathLower, uploadable],
+      ]),
+      remoteFiles: new Map([
+        ["notes/conflicted.md", remoteFile("Notes/Conflicted.md", "remote-hash", "rev-remote")],
+        ["notes/incoming.md", remoteFile("Notes/Incoming.md", "incoming-hash", "rev-incoming")],
+      ]),
+    });
+
+    expect(plan.conflicts.map((conflict) => conflict.type)).toEqual(["both-new"]);
+    expect(plan.operations.map((operation) => `${operation.kind} ${operation.path}`).sort()).toEqual([
+      "download Notes/Incoming.md",
+      "upload Notes/Fresh.md",
+    ]);
+    expect(splitConflicts(plan.conflicts).blocking).toEqual([]);
+  });
+
+  it("blocks the whole plan for a structural conflict", () => {
+    const plan = createSyncPlan({
+      localFiles: new Map([["notes/a.md", localFile("Notes/A.md", "hash")]]),
+      remoteFiles: new Map([["notes", remoteFile("Notes", "hash", "rev")]]),
+    });
+
+    expect(splitConflicts(plan.conflicts).blocking.map((conflict) => conflict.type)).toEqual(["path-shape-conflict"]);
+    expect(plan.operations).toEqual([]);
+  });
+});
+
+function conflictOfType(type: SyncConflictType): SyncConflict {
+  return { kind: "conflict", type, path: `${type}.md`, message: type };
 }
 
 function localFile(path: string, contentHash: string): LocalFileSnapshot {
