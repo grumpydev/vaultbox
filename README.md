@@ -16,7 +16,7 @@ It is built for people who already keep a vault in Dropbox on a desktop machine,
 - Preview changes with simulation before applying them.
 - Choose manual sync for full control or automatic sync for routine updates.
 - Keep Obsidian configuration and hidden directories out of sync by default, with narrow opt-in categories for plugin IDs, themes, snippets, bookmarks, and selected hidden directories.
-- Detect conflicts and stop for a user decision instead of silently overwriting notes.
+- Resolve conflicts per file instead of blocking the whole sync, and never silently lose an edit.
 
 Vaultbox is deliberately conservative. It plans the sync before applying it, tracks file metadata, treats deletes carefully, rechecks files before changing them, and uses Dropbox `rev` values for guarded remote writes.
 
@@ -32,15 +32,37 @@ Vaultbox supports two main workflows.
 
 **Automatic sync** can run on startup, on an interval, or both. It uses the same planning engine as manual sync, but applies safe plans without asking each time.
 
+### Conflicts
+
+A conflict is one file that changed both on this device and in Dropbox since the last sync. Vaultbox resolves these one file at a time, so a single conflicted note never holds up the rest of the vault.
+
+**When a file changed in both places** chooses the default:
+
+- **Keep the newest** compares the local modification time with the Dropbox revision time and keeps the more recent copy. The other version stays recoverable: a replaced local file goes to the vault trash, and Dropbox keeps its own file history.
+- **Keep both copies** always writes the Dropbox version beside the local one as `Note (Dropbox conflict 2026-01-31 14-03).md`, and pushes the local version to Dropbox. Nothing is overwritten.
+- **Always ask me** proposes keeping both and waits for a decision.
+
+Three guards apply to every mode, because a wrong guess costs a note:
+
+- A delete never beats an edit. If one side edited a file and the other deleted it, Vaultbox restores the file by default.
+- Edits made within the **safety window** of each other (60 seconds by default) count as simultaneous, since clocks on two devices do not agree closely enough to call it. Both copies are kept.
+- Attachments and other non-text files keep both copies rather than being judged by timestamp.
+
+With **Review conflicts before syncing** on (the default), Vaultbox lists every conflicted file with what it proposes to do, and each one can be overridden, including "Decide later". A file left undecided stays conflicted and is offered again next sync; everything else still syncs. **Review and sync** in settings opens that list on demand.
+
+Where a conflict copy cannot exist — inside the Obsidian configuration directory, for instance — Vaultbox falls back to keeping the newest file, and leaves the conflict for you if it cannot tell which that is.
+
+Conflicts that are not about file contents still stop the sync: two files whose names differ only by case, a path that is a file on one side and a folder on the other, or damaged sync history. These need a rename or a tracking reset, not a choice, and Vaultbox names the blocking path.
+
 The settings screen also includes **Simulate sync**. Simulation builds the same plan as a real sync without applying file changes or advancing sync tracking. It is useful before first sync, after changing Dropbox folders, and any time the vault state feels uncertain.
 
-Simulation opens a complete, read-only report, grouped into local deletes, remote deletes, uploads, downloads, no-ops, and conflicts. No paths are truncated. Use the copy icon to copy the report, or **Select all** and your device's copy action if clipboard access is unavailable. **View simulation report** beside **Last sync** reopens the snapshot during the current plugin session. A new simulation, a sync attempt, or resetting tracking clears the previous report. The report includes the scan time, plugin version, and Dropbox folder; it is not a live preview, so simulate again after making changes. Reports contain filenames and folder paths: review them for private information before sharing. They do not include file contents or authentication credentials.
+Simulation opens a complete, read-only report, grouped into local deletes, remote deletes, uploads, downloads, no-ops, and conflicts. Each conflict is annotated with what Vaultbox would do with it under the current settings. No paths are truncated. Use the copy icon to copy the report, or **Select all** and your device's copy action if clipboard access is unavailable. **View simulation report** beside **Last sync** reopens the snapshot during the current plugin session. A new simulation, a sync attempt, or resetting tracking clears the previous report. The report includes the scan time, plugin version, and Dropbox folder; it is not a live preview, so simulate again after making changes. Reports contain filenames and folder paths: review them for private information before sharing. They do not include file contents or authentication credentials.
 
 ### Optional Bookmark Sync
 
 Enable **Bookmarks** under **Configuration sync** on each device using Vaultbox where you want bookmark sync. It is off by default, including for existing installations. Vaultbox syncs only `bookmarks.json` in the vault's configured Obsidian configuration directory; desktop and mobile workspace layouts remain excluded.
 
-Bookmarks sync as a whole file, not a merged list. Different bookmark files on the first sync, or changes on both devices since the last sync, produce a conflict and stop the sync rather than silently combining or overwriting them. Back up both versions before choosing which to keep, and run **Simulate sync** before the first sync.
+Bookmarks sync as a whole file, not a merged list. Different bookmark files on the first sync, or changes on both devices since the last sync, produce a conflict rather than a silent merge. Because a conflict copy cannot live in the configuration directory, this conflict is resolved by keeping the newer file, or left for you when the two times are too close to call. Back up both versions before choosing which to keep, and run **Simulate sync** before the first sync.
 
 Turning the option off leaves local and Dropbox bookmark files in place and removes their sync tracking. Re-enabling compares the current files as a fresh sync. Hidden-path exclusions still take precedence. Devices must use the same configuration-directory path to share this file.
 
@@ -58,7 +80,7 @@ If a first sync is interrupted or the selected Dropbox folder is manually cleare
 
 Sync tools need a high bar because mistakes can damage a vault. Vaultbox includes unit tests for the sync planner, sync executor, Dropbox client, auth flow, debug logging, throttling retry behavior, and progress reporting. It also includes live Dropbox end-to-end tests against disposable folders.
 
-The automated tests cover uploads, downloads, local deletes, remote deletes, stale Dropbox `rev` protection, first-sync behavior, conflict detection, case conflicts, reset tracking, and live Dropbox conflict modes.
+The automated tests cover uploads, downloads, local deletes, remote deletes, stale Dropbox `rev` protection, first-sync behavior, conflict detection and resolution, case conflicts, reset tracking, and live Dropbox conflict modes.
 
 That testing does not remove the need for backups, especially while the plugin is young, but it gives the sync logic a real safety net rather than relying only on happy-path manual testing.
 

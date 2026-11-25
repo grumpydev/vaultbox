@@ -5,6 +5,17 @@ import {
   refreshDropboxAccessToken,
 } from "./dropbox-auth";
 import { requestConfirmation } from "./confirmation-modal";
+import { describeResolution, requestConflictResolutions } from "./conflict-modal";
+import {
+  applyResolutions,
+  buildConflictCopyPath,
+  canCreateConflictCopy,
+  chooseAutoResolution,
+  conflictLocalPath,
+  type AppliedResolutions,
+  type ConflictPolicy,
+  type ConflictResolution,
+} from "./conflict-resolution";
 import { DROPBOX_APP_KEY } from "./constants";
 import { DebugLog, type DebugLogEntry } from "./debug-log";
 import { DropboxClient, normalizeDropboxPath } from "./dropbox";
@@ -19,8 +30,10 @@ import {
   createSyncPlan,
   formatSyncPlan,
   getMutationPathDiagnostics,
-  isPlanEmpty,
+  shouldSyncPath,
+  splitConflicts,
   scanLocalVault,
+  type SyncConflict,
   type SyncPlan,
 } from "./sync-plan";
 import { DEFAULT_SETTINGS, type VaultboxSettings, type VaultboxSyncState } from "./types";
@@ -243,7 +256,8 @@ export default class VaultboxPlugin extends Plugin {
     new Notice(`Vaultbox folder validated: ${metadata.pathDisplay || "/"}`);
   }
 
-  async syncNow(): Promise<void> {
+  async syncNow(options: { interactive?: boolean; forcePrompt?: boolean } = {}): Promise<void> {
+    const interactive = options.interactive ?? true;
     this.simulationReport = "";
     const hadExistingSyncState = Object.keys(this.syncState.files).length > 0;
     let progressNotice: Notice | null = null;
@@ -256,30 +270,58 @@ export default class VaultboxPlugin extends Plugin {
       });
       this.settings.lastSyncStartedAt = Date.now();
       progressNotice = new Notice("Vaultbox: preparing sync plan...", 0);
-      const plan = await this.buildSyncPlan();
-      this.writeMutationPathDiagnostics("sync.plan-paths", plan);
-      if (plan.conflicts.length > 0) {
-        const message = formatSyncPlan(plan, "Sync blocked");
+      const planned = await this.buildSyncPlan();
+      this.writeMutationPathDiagnostics("sync.plan-paths", planned);
+      const { resolvable, blocking } = splitConflicts(planned.conflicts);
+
+      // Structural conflicts (case collisions, file/folder clashes, broken history) still
+      // stop everything: they need a rename, not a choice.
+      if (blocking.length > 0) {
+        const message = formatBlockedSync(blocking);
         this.settings.lastSyncSummary = message;
-        this.debugLog.write("sync.conflicts", plan.summary);
+        this.debugLog.write("sync.blocked", { blocking: blocking.length, summary: planned.summary });
         await this.saveSettings();
         progressNotice.hide();
         new Notice(message);
         return;
       }
 
-      if (isPlanEmpty(plan)) {
+      let plan = planned;
+      let resolved = 0;
+      if (resolvable.length > 0) {
+        progressNotice.hide();
+        progressNotice = null;
+        const outcome = await this.resolveConflicts(planned, resolvable, interactive, options.forcePrompt);
+        if (!outcome) {
+          this.debugLog.write("sync.conflicts-cancelled", { conflicts: resolvable.length });
+          new Notice("Sync cancelled.");
+          return;
+        }
+
+        plan = outcome.plan;
+        resolved = outcome.resolved;
+        this.debugLog.write("sync.conflicts", {
+          conflicts: resolvable.length,
+          resolved: outcome.resolved,
+          skipped: outcome.skipped,
+        });
+      }
+
+      if (getPlanChangeCount(plan) === 0) {
+        const message = plan.conflicts.length > 0
+          ? `No changes applied. ${formatConflictCount(plan.conflicts.length)} still need a decision.`
+          : "No sync required. Everything is up to date.";
         this.settings.lastSyncCompletedAt = Date.now();
-        this.settings.lastSyncSummary = "No sync required. Everything is up to date.";
+        this.settings.lastSyncSummary = message;
         this.debugLog.write("sync.noop", plan.summary);
         await this.saveSettings();
-        progressNotice.hide();
-        new Notice("No sync required. Everything is up to date.");
+        progressNotice?.hide();
+        new Notice(message);
         return;
       }
 
       if (this.settings.syncMode === "manual" && this.settings.confirmBeforeManualSync) {
-        progressNotice.hide();
+        progressNotice?.hide();
         progressNotice = null;
         const confirmed = await requestConfirmation(this.app, {
           title: "Confirm sync",
@@ -312,9 +354,15 @@ export default class VaultboxPlugin extends Plugin {
       });
       this.syncState = result.state;
       this.settings.lastSyncCompletedAt = Date.now();
-      this.settings.lastSyncSummary = `Sync complete. Applied ${result.applied} change${result.applied === 1 ? "" : "s"}.`;
+      this.settings.lastSyncSummary = [
+        `Sync complete. Applied ${result.applied} change${result.applied === 1 ? "" : "s"}.`,
+        resolved > 0 ? `Resolved ${formatConflictCount(resolved)}.` : "",
+        plan.conflicts.length > 0 ? `${formatConflictCount(plan.conflicts.length)} left for later.` : "",
+      ].filter(Boolean).join(" ");
       this.debugLog.write("sync.complete", {
         applied: result.applied,
+        resolved,
+        unresolved: plan.conflicts.length,
         summary: plan.summary,
       });
       await this.saveSettings();
@@ -342,11 +390,18 @@ export default class VaultboxPlugin extends Plugin {
         folderPath: this.settings.selectedFolderPath,
       });
       const plan = await this.buildSyncPlan();
+      const conflictPolicy = this.getConflictPolicy();
+      const proposals = new Map(
+        splitConflicts(plan.conflicts).resolvable.map((conflict) => [
+          conflict.path,
+          describeResolution(chooseAutoResolution(conflict, conflictPolicy)),
+        ]),
+      );
       const report = formatCompleteSyncReport(plan, {
         version: this.manifest.version,
         folderPath: this.settings.selectedFolderPath,
         createdAt: new Date().toISOString(),
-      });
+      }, proposals);
       this.writeMutationPathDiagnostics("simulation.plan-paths", plan);
       const message = formatSyncPlan(plan);
       this.settings.lastSyncCompletedAt = Date.now();
@@ -372,6 +427,76 @@ export default class VaultboxPlugin extends Plugin {
     if (this.simulationReport) {
       new SyncReportModal(this.app, this.simulationReport).open();
     }
+  }
+
+  getConflictPolicy(): ConflictPolicy {
+    const policy = this.getSyncPathPolicy();
+    return {
+      mode: this.settings.conflictResolutionMode,
+      ambiguityWindowSeconds: this.settings.conflictAmbiguityWindowSeconds,
+      canCreateConflictCopy: (path: string) => shouldSyncPath(path, policy),
+    };
+  }
+
+  /**
+   * Decide what happens to each conflicted file, then fold those decisions into the plan.
+   * Returns null when the user cancels.
+   */
+  private async resolveConflicts(
+    plan: SyncPlan,
+    resolvable: SyncConflict[],
+    interactive: boolean,
+    forcePrompt = false,
+  ): Promise<AppliedResolutions | null> {
+    const conflictPolicy = this.getConflictPolicy();
+    const suggestions = new Map<string, ConflictResolution>(
+      resolvable.map((conflict) => [conflict.path, chooseAutoResolution(conflict, conflictPolicy)]),
+    );
+
+    let resolutions = suggestions;
+    const prompt = interactive && (forcePrompt || this.settings.conflictPrompt);
+    if (prompt) {
+      const chosen = await requestConflictResolutions(this.app, {
+        conflicts: resolvable,
+        suggestions,
+        allowKeepBoth: (conflict) => canCreateConflictCopy(conflict, conflictPolicy),
+      });
+      if (!chosen) {
+        return null;
+      }
+      resolutions = chosen;
+    } else if (this.settings.conflictResolutionMode === "ask") {
+      // Nobody is there to ask, so leave every conflict for the next manual sync.
+      resolutions = new Map();
+    }
+
+    return applyResolutions(
+      plan,
+      resolutions,
+      (conflict, isTaken) => this.buildConflictCopyPath(conflict, isTaken),
+      { trashOverwrittenLocal: this.settings.conflictKeepOverwrittenLocal },
+    );
+  }
+
+  private buildConflictCopyPath(
+    conflict: SyncConflict,
+    isTaken: (candidate: string) => boolean,
+  ): string | undefined {
+    if (!conflict.remote) {
+      return undefined;
+    }
+
+    const candidate = buildConflictCopyPath(
+      conflictLocalPath(conflict),
+      conflict.remote.serverModified,
+      (path) => isTaken(path) || this.localPathExists(path),
+    );
+
+    return shouldSyncPath(candidate, this.getSyncPathPolicy()) ? candidate : undefined;
+  }
+
+  private localPathExists(path: string): boolean {
+    return Boolean(this.app.vault.getFileByPath(path) ?? this.app.vault.getFolderByPath(path));
   }
 
   async buildSyncPlan(): Promise<SyncPlan> {
@@ -406,6 +531,19 @@ export default class VaultboxPlugin extends Plugin {
       this.debugLog.write(message, diagnostics);
     }
   }
+}
+
+function formatBlockedSync(blocking: SyncConflict[]): string {
+  const shown = blocking.slice(0, 12);
+  return [
+    `Sync blocked: ${formatConflictCount(blocking.length)} must be fixed before Vaultbox can sync.`,
+    ...shown.map((conflict) => `- ${conflict.message}`),
+    blocking.length > shown.length ? `- ${blocking.length - shown.length} more not shown.` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function formatConflictCount(count: number): string {
+  return `${count} conflict${count === 1 ? "" : "s"}`;
 }
 
 function getPlanChangeCount(plan: SyncPlan): number {

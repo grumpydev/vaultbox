@@ -106,6 +106,7 @@ export class VaultboxSettingTab extends PluginSettingTab {
       });
 
     this.addSyncSettings(containerEl);
+    this.addConflictSettings(containerEl);
     this.addConfigurationSyncSettings(containerEl);
     this.addDebugSettings(containerEl);
     this.addSupport(containerEl);
@@ -125,6 +126,91 @@ export class VaultboxSettingTab extends PluginSettingTab {
       cls: "vaultbox-settings-tagline",
       text: "Dropbox folder sync for desktop and mobile vaults.",
     });
+  }
+
+  private addConflictSettings(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("Conflicts")
+      .setHeading();
+
+    new Setting(containerEl)
+      .setName("When a file changed in both places")
+      .setDesc(
+        "Newest wins keeps the more recently edited copy. Attachments, edits made within the safety window of each other, and files whose other version cannot be saved beside them keep both copies instead. A delete never beats an edit.",
+      )
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("newest-wins", "Keep the newest")
+          .addOption("keep-both", "Keep both copies")
+          .addOption("ask", "Always ask me")
+          .setValue(this.plugin.settings.conflictResolutionMode)
+          .onChange(async (value) => {
+            this.plugin.settings.conflictResolutionMode = value === "keep-both"
+              ? "keep-both"
+              : value === "ask"
+                ? "ask"
+                : "newest-wins";
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Review conflicts before syncing")
+      .setDesc("Show the conflicted files and what will happen to each one, so you can override any of them.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.conflictPrompt)
+          .onChange(async (value) => {
+            this.plugin.settings.conflictPrompt = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Safety window")
+      .setDesc("Seconds within which two edits count as simultaneous. Both copies are kept rather than guessing from clocks on different devices.")
+      .addText((text) => {
+        text
+          .setValue(String(this.plugin.settings.conflictAmbiguityWindowSeconds))
+          .onChange(async (value) => {
+            this.plugin.settings.conflictAmbiguityWindowSeconds = Math.max(0, Number.parseInt(value, 10) || 0);
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.type = "number";
+        text.inputEl.min = "0";
+        text.inputEl.step = "5";
+      });
+
+    new Setting(containerEl)
+      .setName("Keep the replaced version")
+      .setDesc("Move a local file to the vault trash before a conflict resolution overwrites it, so it can be recovered.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.conflictKeepOverwrittenLocal)
+          .onChange(async (value) => {
+            this.plugin.settings.conflictKeepOverwrittenLocal = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Review conflicts now")
+      .setDesc("Build a fresh sync plan and open the conflict list, even when review is switched off.")
+      .addButton((button) => {
+        button
+          .setButtonText("Review and sync")
+          .onClick(async () => {
+            button.setDisabled(true);
+            button.setButtonText("Syncing...");
+            try {
+              await this.plugin.syncNow({ interactive: true, forcePrompt: true });
+            } finally {
+              button.setDisabled(false);
+              button.setButtonText("Review and sync");
+              this.display();
+            }
+          });
+      });
   }
 
   private addSyncSettings(containerEl: HTMLElement): void {
